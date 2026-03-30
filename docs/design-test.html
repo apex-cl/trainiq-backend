@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>TrainIQ — Design Test</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg:       '#F8F8F8',
+            surface:  '#F0F0F0',
+            card:     '#EBEBEB',
+            border:   '#DEDEDE',
+            muted:    '#CCCCCC',
+            textMain: '#111111',
+            textDim:  '#888888',
+            amber:    '#2563EB',
+            amberDim: '#DBEAFE',
+            danger:   '#991B1B',
+          },
+          fontFamily: {
+            pixel: ['"VT323"', 'monospace'],
+            mono:  ['"Share Tech Mono"', 'monospace'],
+            sans:  ['Inter', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+  <style>
+    * { -webkit-font-smoothing: antialiased; }
+    body { background: #F8F8F8; color: #111111; font-family: 'Inter', sans-serif; }
+
+    /* Scrollbar unsichtbar */
+    ::-webkit-scrollbar { display: none; }
+
+    /* Pixel-Font Anti-Aliasing aus für echten Pixel-Look */
+    .font-pixel { image-rendering: pixelated; -webkit-font-smoothing: none; font-smoothing: none; }
+
+    /* Blink Animation für Cursor */
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+    .cursor-blink { animation: blink 1.2s infinite; }
+
+    /* Count-up ähnlicher Pulse beim Laden */
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-up { animation: fadeUp 0.4s ease-out forwards; }
+
+    /* Thin progress bar */
+    .bar-track { background: #2A2A2A; height: 3px; border-radius: 0; }
+    .bar-fill  { height: 3px; border-radius: 0; transition: width 1s ease-out; }
+
+    /* Nav active indicator */
+    .nav-active { border-bottom: 2px solid #D4863A; }
+
+    /* Dashed upload border */
+    .dashed-border { border: 1px dashed #3A3A3A; }
+  </style>
+</head>
+<body class="max-w-sm mx-auto min-h-screen flex flex-col relative pb-20">
+
+  <!-- ═══════════════════════════════════════════════
+       STATUS BAR
+  ════════════════════════════════════════════════ -->
+  <div class="flex justify-between items-center px-5 pt-4 pb-2">
+    <span class="text-textDim text-xs font-sans tracking-widest uppercase">09:41</span>
+    <span class="text-textDim text-xs font-mono tracking-wider">TRAINIQ</span>
+    <span class="text-textDim text-xs font-sans">▮▮▮</span>
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════
+       PAGE: DASHBOARD
+  ════════════════════════════════════════════════ -->
+  <div id="page-dashboard" class="flex flex-col gap-0">
+
+    <!-- Recovery Score Hero -->
+    <div class="px-5 pt-6 pb-5 border-b border-border">
+      <div class="flex justify-between items-start mb-1">
+        <span class="text-textDim text-xs tracking-widest uppercase font-sans">Erholung Heute</span>
+        <span class="text-textDim text-xs font-mono">SA 17. MRZ</span>
+      </div>
+      <div class="flex items-end gap-3 mt-2">
+        <span class="font-pixel text-amber fade-up" style="font-size: 88px; line-height: 1;">78</span>
+        <div class="mb-3">
+          <div class="text-xs tracking-widest uppercase text-textDim font-sans">von 100</div>
+          <div class="text-xs tracking-widest uppercase text-amber font-sans mt-1">● BEREIT</div>
+        </div>
+      </div>
+      <div class="bar-track mt-3">
+        <div class="bar-fill bg-amber" style="width: 78%;"></div>
+      </div>
+      <p class="text-textDim text-xs font-sans mt-2 leading-relaxed">
+        HRV liegt 8% über deinem 7-Tage-Schnitt. Intensives Training möglich.
+      </p>
+    </div>
+
+    <!-- Metriken Row -->
+    <div class="grid grid-cols-3 border-b border-border">
+      <!-- HRV -->
+      <div class="px-4 py-4 border-r border-border">
+        <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-2">HRV</div>
+        <div class="font-pixel text-textMain" style="font-size: 32px; line-height:1;">42</div>
+        <div class="text-xs font-sans text-textDim mt-1">ms</div>
+        <div class="text-xs font-sans text-amber mt-1">▲ +8%</div>
+      </div>
+      <!-- Schlaf -->
+      <div class="px-4 py-4 border-r border-border">
+        <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-2">Schlaf</div>
+        <div class="font-pixel text-textMain" style="font-size: 32px; line-height:1;">7.2</div>
+        <div class="text-xs font-sans text-textDim mt-1">std</div>
+        <div class="text-xs font-sans text-textDim mt-1">— gleich</div>
+      </div>
+      <!-- Stress -->
+      <div class="px-4 py-4">
+        <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-2">Stress</div>
+        <div class="font-pixel text-textMain" style="font-size: 32px; line-height:1;">31</div>
+        <div class="text-xs font-sans text-textDim mt-1">/ 100</div>
+        <div class="text-xs font-sans text-amber mt-1">▼ -12%</div>
+      </div>
+    </div>
+
+    <!-- Heutiges Training -->
+    <div class="px-5 py-5 border-b border-border">
+      <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-4">Heute</div>
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-4">
+          <!-- Line-Art Lauf-Icon -->
+          <svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="#F0EEE8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="22" cy="6" r="2.5"/>
+            <path d="M18 10l4 3 3-4"/>
+            <path d="M14 14l4-4 2 6-5 3"/>
+            <path d="M9 28l5-8 4 2 3 6"/>
+            <path d="M20 22l2 6"/>
+          </svg>
+          <div>
+            <div class="font-pixel text-textMain" style="font-size:22px;">EASY RUN</div>
+            <div class="text-xs font-sans text-textDim tracking-wider mt-0.5">ZONE 2 · 140–155 BPM</div>
+          </div>
+        </div>
+        <div class="text-right">
+          <div class="font-pixel text-amber" style="font-size:28px;">45</div>
+          <div class="text-xs font-sans text-textDim tracking-widest">MIN</div>
+        </div>
+      </div>
+      <button class="w-full mt-4 border border-border text-textDim text-xs tracking-widest uppercase font-sans py-2.5 hover:border-amber hover:text-amber transition-colors">
+        Details anzeigen ──→
+      </button>
+    </div>
+
+    <!-- Ernährung Schnellansicht -->
+    <div class="px-5 py-5 border-b border-border">
+      <div class="flex justify-between items-center mb-4">
+        <span class="text-xs tracking-widest uppercase text-textDim font-sans">Ernährung</span>
+        <span class="text-xs font-sans text-amber">● 2 fehlend</span>
+      </div>
+      <!-- Kalorien -->
+      <div class="flex items-center gap-3 mb-3">
+        <span class="text-xs font-sans text-textDim w-16 tracking-wider uppercase">Kalorien</span>
+        <div class="bar-track flex-1">
+          <div class="bar-fill bg-textMain" style="width: 76%;"></div>
+        </div>
+        <span class="font-pixel text-textMain text-sm w-20 text-right">1840<span class="text-textDim text-xs">/2400</span></span>
+      </div>
+      <!-- Protein -->
+      <div class="flex items-center gap-3 mb-3">
+        <span class="text-xs font-sans text-textDim w-16 tracking-wider uppercase">Protein</span>
+        <div class="bar-track flex-1">
+          <div class="bar-fill bg-amber" style="width: 100%;"></div>
+        </div>
+        <span class="font-pixel text-amber text-sm w-20 text-right">148g ✓</span>
+      </div>
+      <!-- Carbs -->
+      <div class="flex items-center gap-3 mb-3">
+        <span class="text-xs font-sans text-textDim w-16 tracking-wider uppercase">Carbs</span>
+        <div class="bar-track flex-1">
+          <div class="bar-fill bg-muted" style="width: 52%;"></div>
+        </div>
+        <span class="font-pixel text-textDim text-sm w-20 text-right">94<span class="text-textDim text-xs">/180g</span></span>
+      </div>
+      <!-- Fett -->
+      <div class="flex items-center gap-3">
+        <span class="text-xs font-sans text-textDim w-16 tracking-wider uppercase">Fett</span>
+        <div class="bar-track flex-1">
+          <div class="bar-fill bg-muted" style="width: 88%;"></div>
+        </div>
+        <span class="font-pixel text-textDim text-sm w-20 text-right">62<span class="text-textDim text-xs">/70g</span></span>
+      </div>
+    </div>
+
+    <!-- Coach CTA -->
+    <div class="px-5 py-5">
+      <button class="w-full bg-card border border-border py-4 text-xs tracking-widest uppercase font-sans hover:border-amber transition-colors text-left px-4">
+        <span class="text-amber font-mono">›</span>
+        <span class="text-textMain ml-2">Coach fragen</span>
+      </button>
+    </div>
+
+  </div><!-- end dashboard -->
+
+  <!-- ═══════════════════════════════════════════════
+       PAGE: CHAT
+  ════════════════════════════════════════════════ -->
+  <div id="page-chat" class="hidden flex flex-col h-full">
+
+    <div class="flex-1 px-4 pt-4 pb-4 flex flex-col gap-4 overflow-y-auto" style="max-height: calc(100vh - 160px);">
+
+      <!-- Coach Nachricht 1 -->
+      <div class="flex gap-3 items-start fade-up">
+        <div class="w-7 h-7 border border-border flex items-center justify-center shrink-0 mt-0.5">
+          <span class="font-pixel text-amber text-xs">C</span>
+        </div>
+        <div class="flex-1">
+          <div class="bg-card border border-border p-3 text-sm font-sans text-textMain leading-relaxed">
+            Guten Morgen. Deine gestrigen Daten sind ausgewertet.
+          </div>
+          <!-- Daten-Karte im Chat -->
+          <div class="border border-border mt-1 p-3">
+            <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-2">HRV Verlauf — 7 Tage</div>
+            <div class="flex items-end gap-1 h-8">
+              <div class="bg-muted w-4" style="height:40%"></div>
+              <div class="bg-muted w-4" style="height:55%"></div>
+              <div class="bg-muted w-4" style="height:70%"></div>
+              <div class="bg-muted w-4" style="height:60%"></div>
+              <div class="bg-textDim w-4" style="height:75%"></div>
+              <div class="bg-textDim w-4" style="height:85%"></div>
+              <div class="bg-amber w-4" style="height:100%"></div>
+            </div>
+            <div class="flex gap-1 mt-1">
+              <span class="text-textDim font-sans w-4 text-center" style="font-size:9px">Mo</span>
+              <span class="text-textDim font-sans w-4 text-center" style="font-size:9px">Di</span>
+              <span class="text-textDim font-sans w-4 text-center" style="font-size:9px">Mi</span>
+              <span class="text-textDim font-sans w-4 text-center" style="font-size:9px">Do</span>
+              <span class="text-textDim font-sans w-4 text-center" style="font-size:9px">Fr</span>
+              <span class="text-textDim font-sans w-4 text-center" style="font-size:9px">Sa</span>
+              <span class="text-amber font-sans w-4 text-center" style="font-size:9px">So</span>
+            </div>
+          </div>
+          <span class="text-xs text-textDim font-sans mt-1 block">07:02</span>
+        </div>
+      </div>
+
+      <!-- Coach Nachricht 2 -->
+      <div class="flex gap-3 items-start">
+        <div class="w-7 h-7 border border-border flex items-center justify-center shrink-0 mt-0.5">
+          <span class="font-pixel text-amber text-xs">C</span>
+        </div>
+        <div class="flex-1">
+          <div class="bg-card border border-border p-3 text-sm font-sans text-textMain leading-relaxed">
+            Deine HRV liegt heute bei
+            <span class="font-pixel text-amber" style="font-size:18px;"> 42ms</span>
+            — das ist <span class="text-amber">8% über</span> deinem Wochendurchschnitt.
+            Du kannst heute intensiv trainieren.
+          </div>
+          <span class="text-xs text-textDim font-sans mt-1 block">07:02</span>
+        </div>
+      </div>
+
+      <!-- User Nachricht -->
+      <div class="flex justify-end">
+        <div class="max-w-xs">
+          <div class="border border-border p-3 text-sm font-sans text-textMain">
+            Was soll ich heute essen vor dem Training?
+          </div>
+          <span class="text-xs text-textDim font-sans mt-1 block text-right">07:05</span>
+        </div>
+      </div>
+
+      <!-- Coach Nachricht 3 -->
+      <div class="flex gap-3 items-start">
+        <div class="w-7 h-7 border border-border flex items-center justify-center shrink-0 mt-0.5">
+          <span class="font-pixel text-amber text-xs">C</span>
+        </div>
+        <div class="flex-1">
+          <div class="bg-card border border-border p-3 text-sm font-sans text-textMain leading-relaxed">
+            Du trainierst in <span class="font-pixel text-amber" style="font-size:18px;"> 2h</span>.
+            Iss jetzt:<br/><br/>
+            <span class="font-mono text-xs text-textDim">→</span> <span class="font-pixel text-textMain" style="font-size:16px;">60g</span> <span class="text-textDim text-xs">Hafer + Banane<br/></span>
+            <span class="font-mono text-xs text-textDim">→</span> <span class="font-pixel text-textMain" style="font-size:16px;">500ml</span> <span class="text-textDim text-xs">Wasser</span>
+          </div>
+          <span class="text-xs text-textDim font-sans mt-1 block">07:05</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Quick Replies -->
+    <div class="px-4 py-2 flex gap-2 overflow-x-auto border-t border-border">
+      <button class="shrink-0 border border-border text-xs font-sans text-textDim px-3 py-1.5 tracking-wider hover:border-amber hover:text-amber transition-colors">Warum?</button>
+      <button class="shrink-0 border border-border text-xs font-sans text-textDim px-3 py-1.5 tracking-wider hover:border-amber hover:text-amber transition-colors">Plan ändern</button>
+      <button class="shrink-0 border border-border text-xs font-sans text-textDim px-3 py-1.5 tracking-wider hover:border-amber hover:text-amber transition-colors">Ruhetag</button>
+      <button class="shrink-0 border border-border text-xs font-sans text-textDim px-3 py-1.5 tracking-wider hover:border-amber hover:text-amber transition-colors">Wochenziel</button>
+    </div>
+
+    <!-- Input -->
+    <div class="px-4 py-3 border-t border-border flex gap-3 items-center">
+      <div class="flex-1 flex items-center gap-2 border border-border px-3 py-2">
+        <span class="text-amber font-mono text-sm">›</span>
+        <input type="text" placeholder="Nachricht..." class="flex-1 bg-transparent text-sm font-sans text-textMain placeholder-textDim outline-none" />
+        <span class="cursor-blink text-amber font-mono">_</span>
+      </div>
+      <!-- Kamera Icon -->
+      <button class="border border-border p-2 hover:border-amber transition-colors">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.5" stroke-linecap="round">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+          <circle cx="12" cy="13" r="4"/>
+        </svg>
+      </button>
+    </div>
+
+  </div><!-- end chat -->
+
+  <!-- ═══════════════════════════════════════════════
+       PAGE: TRAINING
+  ════════════════════════════════════════════════ -->
+  <div id="page-training" class="hidden">
+
+    <!-- 7-Tage Header -->
+    <div class="flex border-b border-border overflow-x-auto">
+      <div class="flex shrink-0">
+        <div class="px-4 py-3 border-r border-border text-center min-w-[52px]">
+          <div class="text-xs font-sans text-textDim tracking-wider mb-1">MO</div>
+          <div class="text-amber text-xs font-sans mb-1">✓</div>
+          <div class="text-xs font-pixel text-textDim" style="font-size:13px;">RUN</div>
+        </div>
+        <div class="px-4 py-3 border-r border-border text-center min-w-[52px]">
+          <div class="text-xs font-sans text-textDim tracking-wider mb-1">DI</div>
+          <div class="text-amber text-xs font-sans mb-1">✓</div>
+          <div class="text-xs font-pixel text-textDim" style="font-size:13px;">BIKE</div>
+        </div>
+        <div class="px-4 py-3 border-r border-border text-center min-w-[52px]">
+          <div class="text-xs font-sans text-textDim tracking-wider mb-1">MI</div>
+          <div class="text-textDim text-xs font-sans mb-1">—</div>
+          <div class="text-xs font-pixel text-textDim" style="font-size:13px;">REST</div>
+        </div>
+        <div class="px-4 py-3 border-r border-border text-center min-w-[52px] border-b-2" style="border-bottom-color:#D4863A">
+          <div class="text-xs font-sans text-textMain tracking-wider mb-1">DO</div>
+          <div class="text-amber text-xs font-sans mb-1">›</div>
+          <div class="font-pixel text-textMain" style="font-size:13px;">RUN</div>
+        </div>
+        <div class="px-4 py-3 border-r border-border text-center min-w-[52px]">
+          <div class="text-xs font-sans text-textDim tracking-wider mb-1">FR</div>
+          <div class="text-textDim text-xs font-sans mb-1"> </div>
+          <div class="text-xs font-pixel text-textDim" style="font-size:13px;">BIKE</div>
+        </div>
+        <div class="px-4 py-3 border-r border-border text-center min-w-[52px]">
+          <div class="text-xs font-sans text-textDim tracking-wider mb-1">SA</div>
+          <div class="text-textDim text-xs font-sans mb-1"> </div>
+          <div class="text-xs font-pixel text-textDim" style="font-size:13px;">LONG</div>
+        </div>
+        <div class="px-4 py-3 text-center min-w-[52px]">
+          <div class="text-xs font-sans text-textDim tracking-wider mb-1">SO</div>
+          <div class="text-textDim text-xs font-sans mb-1"> </div>
+          <div class="text-xs font-pixel text-textDim" style="font-size:13px;">REST</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Heutiges Training Detail -->
+    <div class="px-5 pt-5 pb-4 border-b border-border">
+      <div class="text-xs tracking-widest uppercase text-amber font-sans mb-4">› Heute — Donnerstag</div>
+
+      <div class="flex justify-between items-start mb-4">
+        <div>
+          <div class="font-pixel text-textMain mb-1" style="font-size:28px;">EASY RUN</div>
+          <div class="text-xs font-sans text-textDim tracking-wider">ZONE 2 · AEROB GRUNDLAGE</div>
+        </div>
+        <div class="text-right">
+          <div class="font-pixel text-amber" style="font-size:36px;">45</div>
+          <div class="text-xs font-sans text-textDim tracking-widest">MIN</div>
+        </div>
+      </div>
+
+      <!-- Trainings-Parameter -->
+      <div class="grid grid-cols-2 gap-0 border border-border">
+        <div class="p-3 border-r border-b border-border">
+          <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-1">Intensität</div>
+          <div class="font-pixel text-textMain" style="font-size:18px;">ZONE 2</div>
+        </div>
+        <div class="p-3 border-b border-border">
+          <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-1">Herzfrequenz</div>
+          <div class="font-pixel text-textMain" style="font-size:18px;">140–155</div>
+        </div>
+        <div class="p-3 border-r border-border">
+          <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-1">Tempo</div>
+          <div class="font-pixel text-textMain" style="font-size:18px;">5:45</div>
+        </div>
+        <div class="p-3">
+          <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-1">Distanz</div>
+          <div class="font-pixel text-textMain" style="font-size:18px;">7.8 KM</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Coach Begründung -->
+    <div class="px-5 py-4 border-b border-border">
+      <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-3">Coach Begründung</div>
+      <div class="border-l-2 border-amber pl-3">
+        <p class="text-sm font-sans text-textDim leading-relaxed">
+          "Deine HRV erlaubt intensives Training, aber nach 2 harten Tagen
+          priorisiere ich aerobe Basis. Dieses Training maximiert deine
+          Ausdaueranpassung ohne Überbelastung."
+        </p>
+      </div>
+    </div>
+
+    <!-- Aktionen -->
+    <div class="px-5 py-4 flex gap-3">
+      <button class="flex-1 border border-amber text-amber text-xs tracking-widest uppercase font-sans py-3 hover:bg-amberDim transition-colors">
+        Erledigt ✓
+      </button>
+      <button class="flex-1 border border-border text-textDim text-xs tracking-widest uppercase font-sans py-3 hover:border-amber hover:text-amber transition-colors">
+        Überspringen
+      </button>
+    </div>
+
+  </div><!-- end training -->
+
+  <!-- ═══════════════════════════════════════════════
+       PAGE: ERNÄHRUNG
+  ════════════════════════════════════════════════ -->
+  <div id="page-nutrition" class="hidden px-5 pt-5 flex flex-col gap-5">
+
+    <!-- Upload Bereich -->
+    <div class="dashed-border p-8 flex flex-col items-center justify-center gap-3 hover:border-amber transition-colors cursor-pointer">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.5" stroke-linecap="round">
+        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+        <circle cx="12" cy="13" r="4"/>
+      </svg>
+      <span class="text-xs tracking-widest uppercase text-textDim font-sans">Foto hinzufügen</span>
+    </div>
+
+    <!-- Makro Übersicht -->
+    <div>
+      <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-4">Heute</div>
+      <div class="flex flex-col gap-3">
+        <div class="flex items-center gap-3">
+          <span class="text-xs font-sans text-textDim w-16 tracking-wider uppercase">Kalorien</span>
+          <div class="bar-track flex-1"><div class="bar-fill bg-textMain" style="width:76%"></div></div>
+          <span class="font-pixel text-textMain" style="font-size:14px;white-space:nowrap">1840<span class="text-textDim" style="font-size:11px;">/2400</span></span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs font-sans text-textDim w-16 tracking-wider uppercase">Protein</span>
+          <div class="bar-track flex-1"><div class="bar-fill bg-amber" style="width:100%"></div></div>
+          <span class="font-pixel text-amber" style="font-size:14px;white-space:nowrap">148g ✓</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs font-sans text-amber w-16 tracking-wider uppercase">● Carbs</span>
+          <div class="bar-track flex-1"><div class="bar-fill bg-muted" style="width:52%"></div></div>
+          <span class="font-pixel text-textDim" style="font-size:14px;white-space:nowrap">94<span style="font-size:11px;">/180g</span></span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs font-sans text-textDim w-16 tracking-wider uppercase">Fett</span>
+          <div class="bar-track flex-1"><div class="bar-fill bg-muted" style="width:88%"></div></div>
+          <span class="font-pixel text-textDim" style="font-size:14px;white-space:nowrap">62<span style="font-size:11px;">/70g</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mahlzeiten Liste -->
+    <div>
+      <div class="text-xs tracking-widest uppercase text-textDim font-sans mb-3">Mahlzeiten</div>
+      <div class="flex flex-col">
+        <div class="flex justify-between items-center py-3 border-b border-border">
+          <div>
+            <div class="text-xs font-sans text-textDim tracking-widest uppercase mb-0.5">07:30 · Frühstück</div>
+            <div class="text-sm font-sans text-textMain">Haferflocken + Banane</div>
+          </div>
+          <div class="font-pixel text-textDim" style="font-size:16px;">420</div>
+        </div>
+        <div class="flex justify-between items-center py-3 border-b border-border">
+          <div>
+            <div class="text-xs font-sans text-textDim tracking-widest uppercase mb-0.5">12:15 · Mittagessen</div>
+            <div class="text-sm font-sans text-textMain">Reis + Hähnchen + Brokkoli</div>
+          </div>
+          <div class="font-pixel text-textDim" style="font-size:16px;">680</div>
+        </div>
+        <div class="flex justify-between items-center py-3">
+          <div>
+            <div class="text-xs font-sans text-textDim tracking-widest uppercase mb-0.5">15:45 · Snack</div>
+            <div class="text-sm font-sans text-textMain">Proteinriegel</div>
+          </div>
+          <div class="font-pixel text-textDim" style="font-size:16px;">220</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Coach Tipp -->
+    <div class="border border-amberDim p-4 mb-2">
+      <div class="text-xs tracking-widest uppercase text-amber font-sans mb-2">! Coach Tipp</div>
+      <p class="text-sm font-sans text-textDim leading-relaxed">
+        Du trainierst morgen früh. Iss noch
+        <span class="font-pixel text-textMain" style="font-size:16px;"> 40g </span>
+        Carbs vor dem Schlafen für optimale Glykogen-Speicher.
+      </p>
+    </div>
+
+  </div><!-- end nutrition -->
+
+  <!-- ═══════════════════════════════════════════════
+       PAGE: METRIKEN
+  ════════════════════════════════════════════════ -->
+  <div id="page-metrics" class="hidden px-5 pt-5 flex flex-col gap-6">
+
+    <!-- HRV Chart -->
+    <div>
+      <div class="flex justify-between items-center mb-3">
+        <span class="text-xs tracking-widest uppercase text-textDim font-sans">HRV — 14 Tage</span>
+        <span class="font-pixel text-amber" style="font-size:16px;">42ms</span>
+      </div>
+      <div class="border border-border p-4">
+        <!-- Simple SVG Chart -->
+        <svg width="100%" height="60" viewBox="0 0 300 60" preserveAspectRatio="none">
+          <!-- Baseline gestrichelt (Amber) -->
+          <line x1="0" y1="35" x2="300" y2="35" stroke="#7A4B1F" stroke-width="1" stroke-dasharray="4,4"/>
+          <!-- HRV Linie -->
+          <polyline points="0,45 22,40 44,38 66,42 88,30 110,35 132,28 154,32 176,25 198,30 220,22 242,28 264,20 286,15 300,12"
+            fill="none" stroke="#F0EEE8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <!-- Letzter Punkt Amber -->
+          <circle cx="300" cy="12" r="2.5" fill="#D4863A"/>
+        </svg>
+        <div class="flex justify-between mt-1">
+          <span class="text-textDim font-sans" style="font-size:9px">03.MRZ</span>
+          <span class="text-textDim font-sans" style="font-size:9px">10.MRZ</span>
+          <span class="text-amber font-sans" style="font-size:9px">17.MRZ</span>
+        </div>
+        <div class="flex justify-between mt-2">
+          <span class="text-textDim font-sans text-xs">↓ <span class="font-pixel" style="font-size:13px;">31ms</span></span>
+          <span class="text-textDim font-sans text-xs">Ø <span class="font-pixel text-textDim" style="font-size:13px;">38ms</span></span>
+          <span class="text-amber font-sans text-xs">↑ <span class="font-pixel text-amber" style="font-size:13px;">42ms</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Schlaf Chart -->
+    <div>
+      <div class="flex justify-between items-center mb-3">
+        <span class="text-xs tracking-widest uppercase text-textDim font-sans">Schlaf — Diese Woche</span>
+        <span class="font-pixel text-textMain" style="font-size:16px;">7.2h</span>
+      </div>
+      <div class="border border-border p-4">
+        <div class="flex items-end gap-1.5 h-12">
+          <!-- Schlaf Balken pro Tag -->
+          <div class="flex-1 flex flex-col gap-0.5">
+            <div class="bg-muted" style="height:6px"></div>
+            <div class="bg-textDim" style="height:14px"></div>
+            <div class="bg-card border border-border" style="height:20px"></div>
+          </div>
+          <div class="flex-1 flex flex-col gap-0.5">
+            <div class="bg-muted" style="height:8px"></div>
+            <div class="bg-textDim" style="height:18px"></div>
+            <div class="bg-card border border-border" style="height:18px"></div>
+          </div>
+          <div class="flex-1 flex flex-col gap-0.5">
+            <div class="bg-muted" style="height:4px"></div>
+            <div class="bg-textDim" style="height:10px"></div>
+            <div class="bg-card border border-border" style="height:16px"></div>
+          </div>
+          <div class="flex-1 flex flex-col gap-0.5">
+            <div class="bg-muted" style="height:7px"></div>
+            <div class="bg-textDim" style="height:16px"></div>
+            <div class="bg-card border border-border" style="height:22px"></div>
+          </div>
+          <div class="flex-1 flex flex-col gap-0.5">
+            <div class="bg-muted" style="height:6px"></div>
+            <div class="bg-textDim" style="height:14px"></div>
+            <div class="bg-card border border-border" style="height:20px"></div>
+          </div>
+          <div class="flex-1 flex flex-col gap-0.5">
+            <div class="bg-muted" style="height:9px"></div>
+            <div class="bg-textDim" style="height:20px"></div>
+            <div class="bg-card border border-border" style="height:24px"></div>
+          </div>
+          <div class="flex-1 flex flex-col gap-0.5">
+            <div class="bg-amber" style="height:8px"></div>
+            <div class="bg-textMain" style="height:18px"></div>
+            <div class="bg-muted" style="height:22px"></div>
+          </div>
+        </div>
+        <div class="flex gap-1.5 mt-1">
+          <span class="flex-1 text-center text-textDim font-sans" style="font-size:9px">Mo</span>
+          <span class="flex-1 text-center text-textDim font-sans" style="font-size:9px">Di</span>
+          <span class="flex-1 text-center text-textDim font-sans" style="font-size:9px">Mi</span>
+          <span class="flex-1 text-center text-textDim font-sans" style="font-size:9px">Do</span>
+          <span class="flex-1 text-center text-textDim font-sans" style="font-size:9px">Fr</span>
+          <span class="flex-1 text-center text-textDim font-sans" style="font-size:9px">Sa</span>
+          <span class="flex-1 text-center text-amber font-sans" style="font-size:9px">So</span>
+        </div>
+        <!-- Legende -->
+        <div class="flex gap-4 mt-3">
+          <div class="flex items-center gap-1.5"><div class="w-2 h-2 bg-muted"></div><span class="text-textDim font-sans" style="font-size:9px;">TIEF</span></div>
+          <div class="flex items-center gap-1.5"><div class="w-2 h-2 bg-textDim"></div><span class="text-textDim font-sans" style="font-size:9px;">REM</span></div>
+          <div class="flex items-center gap-1.5"><div class="w-2 h-2 bg-card border border-border"></div><span class="text-textDim font-sans" style="font-size:9px;">LEICHT</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Resting HR -->
+    <div>
+      <div class="flex justify-between items-center mb-3">
+        <span class="text-xs tracking-widest uppercase text-textDim font-sans">Ruhepuls</span>
+        <span class="font-pixel text-textMain" style="font-size:16px;">52 BPM</span>
+      </div>
+      <div class="grid grid-cols-4 gap-0 border border-border">
+        <div class="p-3 border-r border-border text-center">
+          <div class="font-pixel text-textDim" style="font-size:18px;">55</div>
+          <div class="text-textDim font-sans mt-1" style="font-size:9px;">MO</div>
+        </div>
+        <div class="p-3 border-r border-border text-center">
+          <div class="font-pixel text-textDim" style="font-size:18px;">54</div>
+          <div class="text-textDim font-sans mt-1" style="font-size:9px;">DI</div>
+        </div>
+        <div class="p-3 border-r border-border text-center">
+          <div class="font-pixel text-textDim" style="font-size:18px;">53</div>
+          <div class="text-textDim font-sans mt-1" style="font-size:9px;">MI</div>
+        </div>
+        <div class="p-3 text-center">
+          <div class="font-pixel text-amber" style="font-size:18px;">52</div>
+          <div class="text-amber font-sans mt-1" style="font-size:9px;">HEUTE</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end metrics -->
+
+  <!-- ═══════════════════════════════════════════════
+       BOTTOM NAVIGATION
+  ════════════════════════════════════════════════ -->
+  <div class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-sm bg-bg border-t border-border">
+    <div class="flex">
+      <button onclick="showPage('dashboard')" id="nav-dashboard" class="flex-1 flex items-center justify-center py-4">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" class="stroke-amber"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      </button>
+      <button onclick="showPage('training')" id="nav-training" class="flex-1 flex items-center justify-center py-4">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#AAAAAA" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="5" r="2"/><path d="M8 9l4 2 4-2"/><path d="M6 20l4-7 2 2 2-2 4 7"/></svg>
+      </button>
+      <button onclick="showPage('chat')" id="nav-chat" class="flex-1 flex items-center justify-center py-4">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#AAAAAA" stroke-width="1.5" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <button onclick="showPage('nutrition')" id="nav-nutrition" class="flex-1 flex items-center justify-center py-4">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#AAAAAA" stroke-width="1.5" stroke-linecap="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>
+      </button>
+      <button onclick="showPage('metrics')" id="nav-metrics" class="flex-1 flex items-center justify-center py-4">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#AAAAAA" stroke-width="1.5" stroke-linecap="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <script>
+    const pages = ['dashboard','chat','training','nutrition','metrics'];
+
+    function showPage(name) {
+      pages.forEach(p => {
+        document.getElementById('page-' + p).classList.add('hidden');
+        const nav = document.getElementById('nav-' + p);
+        nav.querySelectorAll('svg').forEach(s => { s.setAttribute('stroke','#AAAAAA'); });
+      });
+
+      document.getElementById('page-' + name).classList.remove('hidden');
+      const activeNav = document.getElementById('nav-' + name);
+      activeNav.querySelectorAll('svg').forEach(s => { s.setAttribute('stroke','#2563EB'); });
+    }
+  </script>
+
+</body>
+</html>

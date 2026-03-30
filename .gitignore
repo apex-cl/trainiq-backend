@@ -1,0 +1,12 @@
+.env
+node_modules
+__pycache__
+*.pyc
+.next
+dist
+build
+venv
+.DS_Store
+*.log
+keycloak/data
+core

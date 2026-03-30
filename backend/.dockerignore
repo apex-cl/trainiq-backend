@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+test.db
+.env
+.env.*
+*.egg-info/
+dist/
+build/
+.git/
+.gitignore
+tests/
+*.md
+pyproject.toml
+venv/
