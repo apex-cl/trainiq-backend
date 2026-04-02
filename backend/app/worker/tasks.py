@@ -44,7 +44,11 @@ async def generate_training_plan(ctx: dict, user_id: str, week_start: str):
         from app.models.training import TrainingPlan
         from sqlalchemy import select
 
-        week_date = date.fromisoformat(week_start)
+        try:
+            week_date = date.fromisoformat(week_start)
+        except ValueError:
+            await _publish_status(redis, task_id, "failed", {"error": "Invalid week_start format"})
+            return
 
         async with async_session() as db:
             # Prüfen ob Plan bereits existiert
@@ -171,7 +175,7 @@ async def process_strava_webhook_event(
     )
 
     try:
-        if aspect_type != "create":
+        if aspect_type not in ("create", "delete"):
             await _publish_status(
                 redis,
                 task_id,
@@ -184,7 +188,6 @@ async def process_strava_webhook_event(
         from app.models.watch import WatchConnection
         from app.models.training import TrainingPlan
         from sqlalchemy import select
-        import httpx
 
         strava = StravaService()
 
@@ -201,28 +204,37 @@ async def process_strava_webhook_event(
             if not strava_conn:
                 return
 
-            # Token ggf. erneuern
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(
-                        f"{strava.API_BASE}/activities/{object_id}",
-                        headers={"Authorization": f"Bearer {strava_conn.access_token}"},
+            # Gelöschte Aktivität: Plan-Status zurücksetzen
+            if aspect_type == "delete":
+                from datetime import datetime as _dt
+                event_date = _dt.fromtimestamp(event_time, tz=timezone.utc).date()
+                plan_result = await db.execute(
+                    select(TrainingPlan).where(
+                        TrainingPlan.user_id == user_id,
+                        TrainingPlan.date == event_date,
+                        TrainingPlan.status == "completed",
                     )
-                    resp.raise_for_status()
-                    activity = resp.json()
+                )
+                plan = plan_result.scalar_one_or_none()
+                if plan:
+                    plan.status = "pending"
+                    await db.commit()
+                await _publish_status(redis, task_id, "completed", {"deleted": object_id})
+                logger.info(f"Strava activity deleted | user={user_id} | activity={object_id}")
+                return
+
+            # Token ggf. erneuern und Aktivität laden
+            try:
+                activity = await strava.get_activity(strava_conn.access_token, object_id)
             except Exception:
                 new_tokens = await strava.refresh_token(strava_conn.refresh_token)
                 strava_conn.access_token = new_tokens["access_token"]
                 strava_conn.refresh_token = new_tokens.get(
                     "refresh_token", strava_conn.refresh_token
                 )
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(
-                        f"{strava.API_BASE}/activities/{object_id}",
-                        headers={"Authorization": f"Bearer {strava_conn.access_token}"},
-                    )
-                    resp.raise_for_status()
-                    activity = resp.json()
+                # Token sofort persistieren damit spätere Calls funktionieren
+                await db.commit()
+                activity = await strava.get_activity(strava_conn.access_token, object_id)
 
             update = strava.activity_to_training_plan_update(activity)
             activity_date = date.fromisoformat(update["date"])
@@ -246,6 +258,15 @@ async def process_strava_webhook_event(
         await _publish_status(
             redis, task_id, "completed", {"activity_date": update["date"]}
         )
+        # Echtzeit-Event für das Frontend publishen
+        watch_event = json.dumps({
+            "event": "activity_synced",
+            "provider": "strava",
+            "activity_date": update["date"],
+            "workout_type": update.get("workout_type"),
+            "duration_min": update.get("duration_min"),
+        })
+        await redis.publish(f"watch_events:{user_id}", watch_event)
         logger.info(f"Strava webhook processed | user={user_id} | activity={object_id}")
 
     except Exception as e:
@@ -272,7 +293,15 @@ async def send_weekly_report(ctx: dict):
         sent_count = 0
 
         async with async_session() as db:
-            result = await db.execute(select(User))
+            import uuid as _uuid
+            demo_uuid = _uuid.UUID(settings.demo_user_id)
+            result = await db.execute(
+                select(User).where(
+                    User.id != demo_uuid,
+                    User.email.isnot(None),
+                    User.email.contains("@"),
+                )
+            )
             users = result.scalars().all()
 
             today = date.today()
@@ -280,9 +309,6 @@ async def send_weekly_report(ctx: dict):
 
             demo_id = settings.demo_user_id
             for user in users:
-                # Demo-User und Fake-E-Mails überspringen
-                if str(user.id) == demo_id or not user.email or "@" not in user.email:
-                    continue
                 try:
                     # Metriken der Woche laden
                     metrics_result = await db.execute(

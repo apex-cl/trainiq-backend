@@ -6,10 +6,8 @@ from typing import AsyncGenerator
 from loguru import logger
 
 from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
 
@@ -40,6 +38,12 @@ def _tool_status_message(tool_name: str) -> str:
         "get_user_goals": "🎯 *Lade deine Ziele...*\n\n",
         "get_daily_wellbeing": "💭 *Lade heutiges Befinden...*\n\n",
         "analyze_nutrition_gaps": "🔍 *Analysiere Nährstofflücken...*\n\n",
+        "get_vo2max_history": "📈 *Lade VO2max-Verlauf...*\n\n",
+        "get_injury_history": "🩹 *Prüfe Verletzungshistorie...*\n\n",
+        "get_sleep_trend": "🌙 *Analysiere Schlaftrend...*\n\n",
+        "log_symptom": "📝 *Speichere Symptom...*\n\n",
+        "calculate_training_zones": "⚙️ *Berechne Herzfrequenzzonen...*\n\n",
+        "get_race_history": "🏅 *Lade Wettkampfhistorie...*\n\n",
     }
     return STATUS_MAP.get(tool_name, "")
 
@@ -165,8 +169,8 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
             plan.intensity_zone = 1
             plan.target_hr_min = 0
             plan.target_hr_max = 0
-            plan.description = f"Ruhetag — {grund}"
-            plan.coach_reasoning = grund
+            plan.description = f"Ruhetag — {grund[:200]}"
+            plan.coach_reasoning = grund[:500]
             await db.flush()
             return f"✓ Ruhetag gesetzt für {datum}: {grund}"
         except Exception as e:
@@ -177,6 +181,16 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
         datum: str, workout_type: str, dauer_min: int, zone: int, beschreibung: str
     ) -> str:
         """Aktualisiert eine Trainingseinheit. workout_type: easy_run/tempo_run/interval/long_run/rest/cross_training/swim/bike. zone: 1-5."""
+        _VALID_TYPES = {
+            "easy_run", "tempo_run", "interval", "long_run", "rest",
+            "cross_training", "swim", "bike",
+        }
+        if workout_type not in _VALID_TYPES:
+            return f"Fehler: ungültiger workout_type '{workout_type}'. Erlaubt: {', '.join(sorted(_VALID_TYPES))}"
+        if not (1 <= zone <= 5):
+            return f"Fehler: zone muss zwischen 1 und 5 liegen."
+        if not (0 <= dauer_min <= 600):
+            return f"Fehler: dauer_min muss zwischen 0 und 600 liegen."
         try:
             plan_date = date.fromisoformat(datum)
             result = await db.execute(
@@ -190,7 +204,7 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
             plan.workout_type = workout_type
             plan.duration_min = dauer_min
             plan.intensity_zone = zone
-            plan.description = beschreibung
+            plan.description = beschreibung[:500]
             await db.flush()
             return f"✓ Training aktualisiert: {datum} → {workout_type} ({dauer_min}min, Zone {zone})"
         except Exception as e:
@@ -216,30 +230,30 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
         """Lädt Ernährungsdaten der letzten 7 Tage (Kalorien, Protein, KH, Fett). Aufrufen bei Ernährungsfragen."""
         seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
         result = await db.execute(
-            select(NutritionLog)
-            .where(
+            select(
+                func.count(NutritionLog.id).label("cnt"),
+                func.coalesce(func.sum(NutritionLog.calories), 0).label("cal"),
+                func.coalesce(func.sum(NutritionLog.protein_g), 0).label("protein"),
+                func.coalesce(func.sum(NutritionLog.carbs_g), 0).label("carbs"),
+                func.coalesce(func.sum(NutritionLog.fat_g), 0).label("fat"),
+            ).where(
                 NutritionLog.user_id == user_id,
                 NutritionLog.logged_at >= seven_days_ago,
             )
-            .order_by(NutritionLog.logged_at.desc())
         )
-        logs = result.scalars().all()
-        if not logs:
+        row = result.one()
+        if row.cnt == 0:
             return "Keine Ernährungsdaten vorhanden."
         days = 7
-        total_cal = sum(n.calories or 0 for n in logs)
-        total_protein = sum(n.protein_g or 0 for n in logs)
-        total_carbs = sum(n.carbs_g or 0 for n in logs)
-        total_fat = sum(n.fat_g or 0 for n in logs)
         return json.dumps(
             {
                 "zeitraum": "letzte 7 Tage",
-                "mahlzeiten_gesamt": len(logs),
+                "mahlzeiten_gesamt": row.cnt,
                 "durchschnitt_täglich": {
-                    "kalorien": round(total_cal / days),
-                    "protein_g": round(total_protein / days, 1),
-                    "kohlenhydrate_g": round(total_carbs / days, 1),
-                    "fett_g": round(total_fat / days, 1),
+                    "kalorien": round(float(row.cal) / days),
+                    "protein_g": round(float(row.protein) / days, 1),
+                    "kohlenhydrate_g": round(float(row.carbs) / days, 1),
+                    "fett_g": round(float(row.fat) / days, 1),
                 },
             },
             ensure_ascii=False,
@@ -333,20 +347,167 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
 
         seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
         result = await db.execute(
-            select(NutritionLog).where(
+            select(
+                func.coalesce(func.avg(NutritionLog.calories), 0).label("avg_cal"),
+                func.coalesce(func.avg(NutritionLog.protein_g), 0).label("avg_protein"),
+                func.coalesce(func.avg(NutritionLog.carbs_g), 0).label("avg_carbs"),
+                func.coalesce(func.avg(NutritionLog.fat_g), 0).label("avg_fat"),
+            ).where(
                 NutritionLog.user_id == user_id,
                 NutritionLog.logged_at >= seven_days_ago,
             )
         )
-        logs = result.scalars().all()
-        avg_cal = sum(n.calories or 0 for n in logs) / 7 if logs else 0
-        avg_protein = sum(n.protein_g or 0 for n in logs) / 7 if logs else 0
-        avg_carbs = sum(n.carbs_g or 0 for n in logs) / 7 if logs else 0
-        avg_fat = sum(n.fat_g or 0 for n in logs) / 7 if logs else 0
+        row = result.one()
+        avg_cal = float(row.avg_cal)
+        avg_protein = float(row.avg_protein)
+        avg_carbs = float(row.avg_carbs)
+        avg_fat = float(row.avg_fat)
         planner = MealPlanner()
         return await planner.analyze_nutrient_gaps(
             avg_cal, avg_protein, avg_carbs, avg_fat, kalorien_ziel, protein_ziel_g
         )
+
+    @tool
+    async def get_vo2max_history() -> str:
+        """Lädt den VO2max-Verlauf der letzten 90 Tage. Aufrufen bei Fragen zur Ausdauerleistung oder Fitness-Entwicklung."""
+        from app.models.watch import WatchSync
+        ninety_days_ago = datetime.now(timezone.utc) - timedelta(days=90)
+        result = await db.execute(
+            select(HealthMetric)
+            .where(
+                HealthMetric.user_id == user_id,
+                HealthMetric.vo2_max.isnot(None),
+                HealthMetric.recorded_at >= ninety_days_ago,
+            )
+            .order_by(HealthMetric.recorded_at.desc())
+            .limit(20)
+        )
+        metrics = result.scalars().all()
+        if not metrics:
+            return "Keine VO2max-Daten vorhanden."
+        values = [{"datum": m.recorded_at.date().isoformat(), "vo2max": m.vo2_max} for m in metrics]
+        latest = values[0]["vo2max"]
+        oldest = values[-1]["vo2max"] if len(values) > 1 else latest
+        trend = round(latest - oldest, 1)
+        return json.dumps({
+            "aktuell": latest,
+            "trend_90d": f"{'+' if trend >= 0 else ''}{trend} ml/kg/min",
+            "verlauf": values[:10],
+        }, ensure_ascii=False)
+
+    @tool
+    async def get_injury_history() -> str:
+        """Lädt bekannte Verletzungen und Beschwerden aus dem Gedächtnis. Aufrufen bei Verletzungsfragen oder um Training anzupassen."""
+        from app.services.ai_memory import AIMemoryService
+        mem = AIMemoryService()
+        memories = await mem.get_relevant_memories("Verletzung Schmerzen Beschwerden Knie Rücken", user_id, db)
+        if not memories:
+            return "Keine Verletzungshistorie im Gedächtnis gefunden."
+        return json.dumps([
+            {"fakt": m.content, "kategorie": m.category, "datum": m.created_at.date().isoformat()}
+            for m in memories
+        ], ensure_ascii=False)
+
+    @tool
+    async def get_sleep_trend() -> str:
+        """Lädt detaillierte Schlafdaten der letzten 14 Tage: Dauer, Qualität, Einschlafzeit. Aufrufen bei Schlaffragen."""
+        fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
+        result = await db.execute(
+            select(HealthMetric)
+            .where(
+                HealthMetric.user_id == user_id,
+                HealthMetric.sleep_duration_min.isnot(None),
+                HealthMetric.recorded_at >= fourteen_days_ago,
+            )
+            .order_by(HealthMetric.recorded_at.desc())
+            .limit(14)
+        )
+        metrics = result.scalars().all()
+        if not metrics:
+            return "Keine Schlafdaten vorhanden."
+        durations = [m.sleep_duration_min for m in metrics if m.sleep_duration_min]
+        avg_sleep_h = round(sum(durations) / len(durations) / 60, 1) if durations else 0
+        return json.dumps({
+            "ø_schlaf_stunden_14d": avg_sleep_h,
+            "empfehlung_stunden": 8,
+            "deficit_stunden": round(max(0, 8 - avg_sleep_h), 1),
+            "verlauf": [
+                {
+                    "datum": m.recorded_at.date().isoformat(),
+                    "schlaf_h": round(m.sleep_duration_min / 60, 1) if m.sleep_duration_min else None,
+                }
+                for m in metrics
+            ],
+        }, ensure_ascii=False)
+
+    @tool
+    async def log_symptom(symptom: str, schweregrad: int, bereich: str) -> str:
+        """Speichert ein Symptom oder eine Beschwerde im Gedächtnis für zukünftige Referenz.
+        symptom: Beschreibung des Symptoms.
+        schweregrad: 1 (leicht) bis 10 (sehr stark).
+        bereich: körperlicher Bereich (z.B. 'Knie links', 'Rücken', 'Kopf', 'allgemein')."""
+        # Bounds check on tool inputs
+        schweregrad = max(1, min(10, int(schweregrad)))
+        symptom = str(symptom)[:500]
+        bereich = str(bereich)[:200]
+        from app.services.ai_memory import AIMemoryService
+        mem = AIMemoryService()
+        fact_text = f"Symptom: {symptom} | Schweregrad: {schweregrad}/10 | Bereich: {bereich} | Datum: {date.today().isoformat()}"
+        # Als Injury-Fakt speichern
+        from app.models.ai_memory import AIMemory
+        import uuid
+        entry = AIMemory(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            content=fact_text,
+            category="injury",
+        )
+        db.add(entry)
+        await db.flush()
+        return f"✓ Symptom gespeichert: {fact_text}"
+
+    @tool
+    async def calculate_training_zones(max_hr: int, resting_hr: int, method: str = "karvonen") -> str:
+        """Berechnet persönliche Herzfrequenztrainingszonen.
+        max_hr: Maximale Herzfrequenz.
+        resting_hr: Ruheherzfrequenz.
+        method: 'karvonen' (Herzfrequenzreserve) oder 'percentage' (% von HRmax)."""
+        hrr = max_hr - resting_hr
+        if method == "karvonen":
+            zones = {
+                "Zone 1 (Regeneration)": (round(resting_hr + 0.50 * hrr), round(resting_hr + 0.60 * hrr)),
+                "Zone 2 (Grundlage, aerob)": (round(resting_hr + 0.60 * hrr), round(resting_hr + 0.70 * hrr)),
+                "Zone 3 (Tempo, aerob-anaerob)": (round(resting_hr + 0.70 * hrr), round(resting_hr + 0.80 * hrr)),
+                "Zone 4 (Schwelle)": (round(resting_hr + 0.80 * hrr), round(resting_hr + 0.90 * hrr)),
+                "Zone 5 (VO2max, maximal)": (round(resting_hr + 0.90 * hrr), max_hr),
+            }
+        else:
+            zones = {
+                "Zone 1 (Regeneration)": (round(max_hr * 0.50), round(max_hr * 0.60)),
+                "Zone 2 (Grundlage, aerob)": (round(max_hr * 0.60), round(max_hr * 0.70)),
+                "Zone 3 (Tempo)": (round(max_hr * 0.70), round(max_hr * 0.80)),
+                "Zone 4 (Schwelle)": (round(max_hr * 0.80), round(max_hr * 0.90)),
+                "Zone 5 (Maximal)": (round(max_hr * 0.90), max_hr),
+            }
+        return json.dumps({
+            "methode": method,
+            "max_hr": max_hr,
+            "resting_hr": resting_hr,
+            "zonen": {name: f"{low}–{high} bpm" for name, (low, high) in zones.items()},
+        }, ensure_ascii=False)
+
+    @tool
+    async def get_race_history() -> str:
+        """Lädt vergangene Wettkampfergebnisse und persönliche Bestzeiten aus dem Gedächtnis."""
+        from app.services.ai_memory import AIMemoryService
+        mem = AIMemoryService()
+        memories = await mem.get_relevant_memories("Wettkampf Rennen Marathon Halbmarathon Bestzeit Ergebnis km/h", user_id, db)
+        if not memories:
+            return "Keine Wettkampfhistorie im Gedächtnis gefunden."
+        return json.dumps([
+            {"fakt": m.content, "kategorie": m.category, "datum": m.created_at.date().isoformat()}
+            for m in memories
+        ], ensure_ascii=False)
 
     return [
         get_user_metrics,
@@ -359,41 +520,40 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
         get_user_goals,
         get_daily_wellbeing,
         analyze_nutrition_gaps,
+        get_vo2max_history,
+        get_injury_history,
+        get_sleep_trend,
+        log_symptom,
+        calculate_training_zones,
+        get_race_history,
     ]
 
 
 class LangChainCoachAgent:
-    """LangChain Agent mit Streaming-Support und autonomen Tool-Aufrufen."""
+    """LangChain Agent mit bind_tools-Pattern (LangChain ≥1.0), Streaming und autonomen Tool-Aufrufen."""
 
     def __init__(self):
         self.memory_service = AIMemoryService()
 
-    def _build_executor(
-        self, user_id: str, db: AsyncSession, streaming: bool = True
-    ) -> AgentExecutor:
-        llm = _create_llm(streaming=streaming)
-        tools = _create_tools(user_id, db)
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", get_base_system_prompt()),
-                MessagesPlaceholder("chat_history"),
-                ("human", "{input}"),
-                MessagesPlaceholder("agent_scratchpad"),
-            ]
-        )
-        agent = create_openai_tools_agent(llm, tools, prompt)
-        return AgentExecutor(
-            agent=agent,
-            tools=tools,
-            verbose=False,
-            max_iterations=6,
-            return_intermediate_steps=False,
-        )
+    def _build_llm(self, streaming: bool = True) -> ChatOpenAI:
+        return _create_llm(streaming=streaming)
+
+    async def _run_tool(self, tool_name: str, tool_args: dict, tools_by_name: dict) -> str:
+        """Führt ein einzelnes Tool aus und gibt das Ergebnis als String zurück."""
+        t = tools_by_name.get(tool_name)
+        if not t:
+            return f"Unbekanntes Tool: {tool_name}"
+        try:
+            result = await t.ainvoke(tool_args)
+            return str(result)
+        except Exception as e:
+            logger.warning(f"Tool {tool_name} failed | args={tool_args} | error={e}")
+            return f"Tool-Fehler ({tool_name}): {e}"
 
     async def stream(
         self, message: str, user_id: str, db: AsyncSession
     ) -> AsyncGenerator[str, None]:
-        """Streaming-Chat via LangChain Agent (SSE-Format: 'data: text\\n\\n')."""
+        """Streaming-Chat via bind_tools Agent-Loop (SSE-Format: 'data: text\\n\\n')."""
         if not settings.active_llm_api_key:
             yield "data: Coach nicht verfügbar — LLM_API_KEY fehlt.\n\n"
             yield "data: [DONE]\n\n"
@@ -413,61 +573,68 @@ class LangChainCoachAgent:
         db.add(user_conv)
         await db.flush()
 
-        # Chat-History für LangChain
-        chat_history = []
+        # Messages aufbauen
+        lc_messages: list = [SystemMessage(content=get_base_system_prompt())]
         for conv in history:
             if conv.role == "user":
-                chat_history.append(HumanMessage(content=conv.content))
+                lc_messages.append(HumanMessage(content=conv.content))
             else:
-                chat_history.append(AIMessage(content=conv.content))
+                lc_messages.append(AIMessage(content=conv.content))
+        lc_messages.append(HumanMessage(content=message))
+
+        # Tools vorbereiten
+        tools_list = _create_tools(user_id, db)
+        tools_by_name = {t.name: t for t in tools_list}
+        llm_with_tools = self._build_llm(streaming=False).bind_tools(tools_list)
+        llm_streaming = self._build_llm(streaming=True)
 
         full_response = ""
-        tool_call_active = False  # Flag: Aktuell läuft ein Tool-Call
 
         try:
-            executor = self._build_executor(user_id, db, streaming=True)
-            async for event in executor.astream_events(
-                {"input": message, "chat_history": chat_history},
-                version="v1",
-            ):
-                event_name = event.get("event", "")
+            # Agent-Loop: max 6 Tool-Runden
+            for _round in range(6):
+                ai_msg = await llm_with_tools.ainvoke(lc_messages)
+                tool_calls_list = ai_msg.tool_calls if hasattr(ai_msg, "tool_calls") else []
 
-                # Tool-Call Start: Streaming pausieren
-                if event_name == "on_tool_start":
-                    tool_call_active = True
-                    tool_name = event.get("name", "tool")
-                    # Kurze Status-Info an User (einmalig, kein Stream-Chunk)
+                if not tool_calls_list:
+                    # Keine Tools mehr → finale Antwort streamen
+                    final_text = (ai_msg.content or "").strip()
+                    if not final_text:
+                        # Leer → explizit nach Antwort fragen
+                        lc_messages.append(ai_msg)
+                        lc_messages.append(HumanMessage(content="Bitte gib jetzt deine Antwort auf Deutsch."))
+                        async for chunk in llm_streaming.astream(lc_messages):
+                            text = chunk.content or ""
+                            if text:
+                                full_response += text
+                                safe = text.replace("\n", "\ndata: ")
+                                yield f"data: {safe}\n\n"
+                    else:
+                        # Direkt streamen (chunk-weise simulieren)
+                        for chunk_text in _split_into_chunks(final_text, size=40):
+                            full_response += chunk_text
+                            safe = chunk_text.replace("\n", "\ndata: ")
+                            yield f"data: {safe}\n\n"
+                    break
+
+                # Tool-Calls ausführen
+                lc_messages.append(ai_msg)
+                for tc in tool_calls_list:
+                    tool_name = tc["name"]
+                    tool_args = tc.get("args", {})
                     status_msg = _tool_status_message(tool_name)
                     if status_msg:
                         full_response += status_msg
                         yield f"data: {status_msg}\n\n"
-                    continue
-
-                # Tool-Call Ende: Streaming wieder freigeben
-                if event_name == "on_tool_end":
-                    tool_call_active = False
-                    continue
-
-                # Nur finale LLM-Antwort streamen (nicht während Tool-Calls)
-                if event_name == "on_chat_model_stream" and not tool_call_active:
-                    chunk = event.get("data", {}).get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
-                        text = chunk.content
-                        # Reasoning/Thinking ignorieren (falls als Chunk-Attribut)
-                        if hasattr(chunk, "additional_kwargs"):
-                            reasoning = chunk.additional_kwargs.get("reasoning", "")
-                            if reasoning and not text:
-                                continue
-                        full_response += text
-                        # Newlines in SSE escapen
-                        safe = text.replace("\n", "\ndata: ")
-                        yield f"data: {safe}\n\n"
+                    tool_result = await self._run_tool(tool_name, tool_args, tools_by_name)
+                    lc_messages.append(ToolMessage(
+                        content=tool_result,
+                        tool_call_id=tc["id"],
+                    ))
 
         except Exception as e:
             logger.error(f"LangChain stream failed | user={user_id} | error={e}")
-            # Fallback auf CoachAgent
             from app.services.coach_agent import CoachAgent
-
             fallback = CoachAgent()
             async for chunk in fallback.stream(message, user_id, db):
                 yield chunk
@@ -475,9 +642,10 @@ class LangChainCoachAgent:
 
         # Antwort + Memory speichern
         if full_response:
-            db.add(
-                Conversation(user_id=user_id, role="assistant", content=full_response)
-            )
+            clean_response = full_response
+            for status in _tool_status_message.__defaults__ or []:
+                clean_response = clean_response.replace(status, "")
+            db.add(Conversation(user_id=user_id, role="assistant", content=full_response))
             await db.flush()
             await self.memory_service.extract_and_store(
                 message, user_id, db, conversation_id=str(user_conv.id)
@@ -497,36 +665,43 @@ class LangChainCoachAgent:
             )
             old_ids = [r[0] for r in oldest.all()]
             if old_ids:
-                await db.execute(
-                    delete(Conversation).where(Conversation.id.in_(old_ids))
-                )
+                await db.execute(delete(Conversation).where(Conversation.id.in_(old_ids)))
                 await db.flush()
 
         yield "data: [DONE]\n\n"
 
     async def run_autonomous(self, user_id: str, task: str, db: AsyncSession) -> str:
-        """
-        Führt den Agent autonom aus (kein Streaming) — für Hintergrund-Jobs.
-        Gibt die finale Agent-Ausgabe zurück.
-        """
+        """Führt den Agent autonom aus (kein Streaming) — für Hintergrund-Jobs."""
         if not settings.active_llm_api_key:
             return "LLM nicht konfiguriert"
         try:
-            llm = _create_llm(streaming=False)
-            tools = _create_tools(user_id, db)
-            prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", get_autonomous_system_prompt()),
-                    ("human", "{input}"),
-                    MessagesPlaceholder("agent_scratchpad"),
-                ]
-            )
-            agent = create_openai_tools_agent(llm, tools, prompt)
-            executor = AgentExecutor(
-                agent=agent, tools=tools, verbose=True, max_iterations=8
-            )
-            result = await executor.ainvoke({"input": task, "chat_history": []})
-            return result.get("output", "Fertig")
+            tools_list = _create_tools(user_id, db)
+            tools_by_name = {t.name: t for t in tools_list}
+            llm = self._build_llm(streaming=False).bind_tools(tools_list)
+
+            messages: list = [
+                SystemMessage(content=get_autonomous_system_prompt()),
+                HumanMessage(content=task),
+            ]
+
+            for _ in range(8):
+                ai_msg = await llm.ainvoke(messages)
+                tool_calls_list = ai_msg.tool_calls if hasattr(ai_msg, "tool_calls") else []
+                if not tool_calls_list:
+                    return (ai_msg.content or "Fertig").strip()
+                messages.append(ai_msg)
+                for tc in tool_calls_list:
+                    result = await self._run_tool(tc["name"], tc.get("args", {}), tools_by_name)
+                    messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
+
+            # Finale Antwort anfordern
+            final = await self._build_llm(streaming=False).ainvoke(messages)
+            return (final.content or "Fertig").strip()
         except Exception as e:
             logger.error(f"Autonomous run failed | user={user_id} | error={e}")
             return f"Fehler: {e}"
+
+
+def _split_into_chunks(text: str, size: int = 40) -> list[str]:
+    """Teilt Text in Chunks auf für simuliertes Streaming."""
+    return [text[i:i + size] for i in range(0, len(text), size)]

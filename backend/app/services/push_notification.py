@@ -8,26 +8,11 @@ import httpx
 from datetime import datetime, timezone
 from typing import Optional
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import Column, Integer, String, DateTime, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
-from app.core.database import async_session
+from app.core.database import async_session, Base
 from app.models.user import User
-
-
-class PushSubscription(Base):
-    __tablename__ = "push_subscriptions"
-
-    id: int
-    user_id: str
-    endpoint: str
-    p256dh: str
-    auth: str
-    created_at: datetime
-
-
-from sqlalchemy import Column, Integer, String, DateTime
-from app.core.database import Base
 
 
 class PushSubscriptionModel(Base):
@@ -72,11 +57,12 @@ class PushNotificationService:
         await db.flush()
         return sub
 
-    async def unsubscribe(self, endpoint: str, db: AsyncSession) -> bool:
-        """Löscht ein Push-Abo."""
+    async def unsubscribe(self, endpoint: str, user_id: str, db: AsyncSession) -> bool:
+        """Löscht ein Push-Abo — nur wenn es dem anfragenden User gehört."""
         result = await db.execute(
             select(PushSubscriptionModel).where(
-                PushSubscriptionModel.endpoint == endpoint
+                PushSubscriptionModel.endpoint == endpoint,
+                PushSubscriptionModel.user_id == user_id,
             )
         )
         sub = result.scalar_one_or_none()

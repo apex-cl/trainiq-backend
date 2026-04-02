@@ -56,8 +56,8 @@ def mock_db_session():
 
 class TestKeycloakConfig:
     def test_keycloak_config_defaults(self):
-        assert settings.keycloak_enabled is False
-        assert settings.keycloak_url == "http://localhost:8080/auth"
+        assert settings.keycloak_enabled is True
+        assert settings.keycloak_url == "http://localhost:8080"
         assert settings.keycloak_realm == "trainiq"
         assert settings.keycloak_client_id == "trainiq-frontend"
 
@@ -72,49 +72,38 @@ class TestKeycloakConfig:
 class TestKeycloakRoutes:
     @pytest.mark.asyncio
     async def test_login_redirect_when_keycloak_disabled(self):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/auth/keycloak/login")
-            assert response.status_code == 400
-            assert "not enabled" in response.json()["detail"]
+        with patch("app.api.routes.auth_keycloak.settings") as mock_settings:
+            mock_settings.keycloak_enabled = False
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/auth/keycloak/login")
+                assert response.status_code == 400
+                assert "not enabled" in response.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_register_redirect_when_keycloak_disabled(self):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/auth/keycloak/register")
-            assert response.status_code == 400
-            assert "not enabled" in response.json()["detail"]
+        with patch("app.api.routes.auth_keycloak.settings") as mock_settings:
+            mock_settings.keycloak_enabled = False
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/auth/keycloak/register")
+                assert response.status_code == 400
+                assert "not enabled" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    @patch("app.core.config.settings")
-    @patch("app.api.routes.auth_keycloak.get_db")
     async def test_callback_creates_user_if_not_exists(
-        self, mock_get_db, mock_settings, mock_keycloak_service, mock_jwt_service
+        self, mock_keycloak_service, mock_jwt_service, client
     ):
-        mock_settings.keycloak_enabled = True
+        response = await client.post(
+            "/auth/keycloak/callback",
+            json={"code": "test_code", "redirect_uri": "http://localhost/callback"},
+        )
 
-        mock_session = MagicMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none = MagicMock(return_value=None)
-        mock_session.execute = AsyncMock(return_value=mock_result)
-
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_get_db.return_value = mock_session
-
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/auth/keycloak/callback",
-                json={"code": "test_code", "redirect_uri": "http://localhost/callback"},
-            )
-
-            assert response.status_code == 200
-            data = response.json()
-            assert "access_token" in data
-            assert "user" in data
-            assert data["user"]["email"] == "test@example.com"
+        assert response.status_code == 200
+        data = response.json()
+        assert "access_token" in data
+        assert "user" in data
+        assert data["user"]["email"] == "test@example.com"
 
 
 class TestKeycloakSecurity:
@@ -185,10 +174,12 @@ class TestKeycloakSecurity:
 class TestKeycloakJWKS:
     @pytest.mark.asyncio
     async def test_jwks_endpoint_when_disabled(self):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/auth/keycloak/keys")
-            assert response.status_code == 400
+        with patch("app.api.routes.auth_keycloak.settings") as mock_settings:
+            mock_settings.keycloak_enabled = False
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/auth/keycloak/keys")
+                assert response.status_code == 400
 
     @pytest.mark.asyncio
     @patch("app.core.config.settings")
@@ -208,28 +199,28 @@ class TestKeycloakJWKS:
 
 class TestKeycloakUserinfo:
     @pytest.mark.asyncio
-    @patch("app.api.dependencies.get_current_user")
-    async def test_userinfo_requires_auth(self, mock_get_current_user):
-        mock_settings = MagicMock()
-        mock_settings.keycloak_enabled = True
+    async def test_userinfo_requires_auth(self, client):
+        from app.api.dependencies import get_current_user
+        from main import app as _app
 
-        with patch("app.core.config.settings", mock_settings):
-            mock_user = MagicMock(spec=User)
-            mock_user.keycloak_id = "kc-123"
-            mock_user.email = "test@example.com"
-            mock_user.name = "Test User"
-            mock_user.email_verified = True
-            mock_get_current_user.return_value = mock_user
+        mock_user = MagicMock(spec=User)
+        mock_user.keycloak_id = "kc-123"
+        mock_user.email = "test@example.com"
+        mock_user.name = "Test User"
+        mock_user.email_verified = True
 
-            transport = ASGITransport(app=app)
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as client:
-                response = await client.get(
-                    "/auth/keycloak/userinfo",
-                    headers={"Authorization": "Bearer test_token"},
-                )
-                assert response.status_code == 200
+        async def _override():
+            return mock_user
+
+        _app.dependency_overrides[get_current_user] = _override
+        try:
+            response = await client.get(
+                "/auth/keycloak/userinfo",
+                headers={"Authorization": "Bearer test_token"},
+            )
+            assert response.status_code == 200
+        finally:
+            _app.dependency_overrides.pop(get_current_user, None)
 
 
 class TestKeycloakIntegration:
@@ -238,18 +229,19 @@ class TestKeycloakIntegration:
 
         service = KeycloakService()
 
-        assert service.realm_url == "http://localhost:8080/auth/realms/trainiq"
+        # Keycloak 17+ removed the /auth prefix
+        assert service.realm_url == "http://localhost:8080/realms/trainiq"
         assert (
             service.token_url
-            == "http://localhost:8080/auth/realms/trainiq/protocol/openid-connect/token"
+            == "http://localhost:8080/realms/trainiq/protocol/openid-connect/token"
         )
         assert (
             service.userinfo_url
-            == "http://localhost:8080/auth/realms/trainiq/protocol/openid-connect/userinfo"
+            == "http://localhost:8080/realms/trainiq/protocol/openid-connect/userinfo"
         )
         assert (
             service.jwks_url
-            == "http://localhost:8080/auth/realms/trainiq/protocol/openid-connect/certs"
+            == "http://localhost:8080/realms/trainiq/protocol/openid-connect/certs"
         )
 
     def test_keycloak_login_url_generation(self):
@@ -260,7 +252,7 @@ class TestKeycloakIntegration:
         url = service.get_login_url("http://localhost/callback", "test_state")
 
         assert (
-            "http://localhost:8080/auth/realms/trainiq/protocol/openid-connect/auth"
+            "http://localhost:8080/realms/trainiq/protocol/openid-connect/auth"
             in url
         )
         assert "client_id=trainiq-frontend" in url

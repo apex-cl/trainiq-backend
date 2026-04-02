@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.responses import ORJSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -153,17 +154,26 @@ async def lifespan(app: FastAPI):
         scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="TrainIQ API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="TrainIQ API",
+    version="1.0.0",
+    lifespan=lifespan,
+    default_response_class=ORJSONResponse,  # ~2-3× faster JSON serialization
+)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-_origins = [
-    "http://localhost",
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:8000",
-]
+if settings.dev_mode:
+    _origins = [
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:8000",
+    ]
+else:
+    # Production: only the explicitly configured frontend URL is allowed
+    _origins = [settings.frontend_url] if settings.frontend_url else []
 if settings.frontend_url and settings.frontend_url not in _origins:
     _origins.append(settings.frontend_url)
 
@@ -171,8 +181,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Guest-Token", "X-Request-ID"],
 )
 
 
@@ -190,6 +200,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["Strict-Transport-Security"] = (
                 "max-age=31536000; includeSubDomains"
             )
+        # Correlation ID für Tracing / Logs
+        req_id = request.headers.get("X-Request-ID", "")
+        if req_id:
+            response.headers["X-Request-ID"] = req_id
         return response
 
 
@@ -277,17 +291,7 @@ async def health():
             log.warning(f"Health check: LLM API nicht erreichbar | error={e}")
 
     if settings.strava_client_id:
-        try:
-            import httpx
-
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(
-                    "https://www.strava.com/api/v3/athlete",
-                    headers={"Authorization": "Bearer dummy"},
-                )
-                strava_ok = "configured"
-        except Exception:
-            strava_ok = "configured"
+        strava_ok = "configured"  # Key is set — actual connectivity not checked here
 
     all_ok = db_ok and redis_ok
     return {

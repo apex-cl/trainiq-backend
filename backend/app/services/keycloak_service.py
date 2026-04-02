@@ -66,7 +66,7 @@ class KeycloakService:
         return f"{self.realm_url}/protocol/openid-connect/registrations?{urlencode(params)}"
 
     async def exchange_code(self, code: str, redirect_uri: str) -> Optional[dict]:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 self.token_url,
                 data={
@@ -82,7 +82,7 @@ class KeycloakService:
             return None
 
     async def refresh_token(self, refresh_token: str) -> Optional[dict]:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 self.token_url,
                 data={
@@ -97,7 +97,7 @@ class KeycloakService:
             return None
 
     async def get_userinfo(self, access_token: str) -> Optional[dict]:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 self.userinfo_url,
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -107,7 +107,7 @@ class KeycloakService:
             return None
 
     async def logout(self, refresh_token: str) -> bool:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 self.logout_url,
                 data={
@@ -119,14 +119,14 @@ class KeycloakService:
             return response.status_code == 204
 
     async def get_jwks(self) -> Optional[dict]:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(self.jwks_url)
             if response.status_code == 200:
                 return response.json()
             return None
 
     async def get_openid_config(self) -> Optional[dict]:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(self.well_known_url)
             if response.status_code == 200:
                 return response.json()
@@ -139,7 +139,7 @@ class KeycloakService:
         if not self.admin_user or not self.admin_password:
             return None
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{self.keycloak_url}/realms/master/protocol/openid-connect/token",
                 data={
@@ -186,7 +186,7 @@ class KeycloakService:
             user_data["firstName"] = first_name
             user_data["lastName"] = last_name
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{self.keycloak_url}/admin/realms/{self.realm}/users",
                 json=user_data,
@@ -205,7 +205,7 @@ class KeycloakService:
         if not admin_token:
             return None
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{self.keycloak_url}/admin/realms/{self.realm}/users",
                 params={"email": email, "exact": True},
@@ -221,7 +221,7 @@ class KeycloakService:
         if not admin_token:
             return False
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.put(
                 f"{self.keycloak_url}/admin/realms/{self.realm}/users/{user_id}/send-verify-email",
                 headers={"Authorization": f"Bearer {admin_token}"},
@@ -233,7 +233,7 @@ class KeycloakService:
         if not admin_token:
             return False
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.put(
                 f"{self.keycloak_url}/admin/realms/{self.realm}/users/{user_id}/execute-actions-email",
                 json=["UPDATE_PASSWORD"],

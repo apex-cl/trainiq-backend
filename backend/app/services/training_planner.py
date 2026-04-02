@@ -183,10 +183,17 @@ intensity_zone: 1-5 (1=sehr leicht, 5=maximal)"""
 
         # Neuen Plan speichern
         created = []
+        valid_dates = {(week_start + timedelta(days=i)).isoformat() for i in range(7)}
         for plan_data in plans_data[:7]:
+            plan_date_str = plan_data.get("date", "")
+            if plan_date_str not in valid_dates:
+                logger.warning(
+                    f"LLM returned out-of-range date '{plan_date_str}' for user={user_id}, skipping"
+                )
+                continue
             plan = TrainingPlan(
                 user_id=uid,
-                date=date.fromisoformat(plan_data["date"]),
+                date=date.fromisoformat(plan_date_str),
                 sport=plan_data.get("sport", sport),
                 workout_type=plan_data["workout_type"],
                 duration_min=plan_data.get("duration_min", 0),

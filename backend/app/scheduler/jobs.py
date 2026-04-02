@@ -1,21 +1,30 @@
 from datetime import date, timedelta, datetime, timezone
-from sqlalchemy import select
+from sqlalchemy import select, exists
 from loguru import logger
 from app.core.database import async_session
 from app.models.user import User
 from app.models.training import TrainingPlan
+from app.models.watch import WatchConnection
 from app.services.watch_sync import WatchSync
 from app.services.training_planner import TrainingPlanner
 
 
 async def sync_watch_data_for_all_users():
-    """Sync watch data for all active users. Runs every 4 hours."""
+    """Sync watch data for users WITHOUT a real watch connection (demo/fallback). Runs every 4 hours."""
     async with async_session() as db:
         try:
-            result = await db.execute(select(User))
+            # Nur User ohne aktive Watch-Verbindung (für die gibt es Webhook-Push)
+            result = await db.execute(
+                select(User).where(
+                    ~exists().where(
+                        WatchConnection.user_id == User.id,
+                        WatchConnection.is_active == True,
+                    )
+                )
+            )
             users = result.scalars().all()
             watch = WatchSync()
-            logger.info(f"Watch sync started | users={len(users)}")
+            logger.info(f"Watch sync started | users_without_connection={len(users)}")
             synced = 0
 
             for user in users:
@@ -40,7 +49,12 @@ async def generate_tomorrow_plans():
     """Generate tomorrow's training plan for all users. Runs daily at 21:00."""
     async with async_session() as db:
         try:
-            result = await db.execute(select(User))
+            result = await db.execute(
+                select(User).where(
+                    User.email.isnot(None),
+                    User.email.contains("@"),
+                )
+            )
             users = result.scalars().all()
             planner = TrainingPlanner()
             tomorrow = date.today() + timedelta(days=1)

@@ -54,10 +54,14 @@ JSON:"""
     def __init__(self):
         self.llm_configured = bool(settings.active_llm_api_key)
         self.embeddings_configured = bool(
-            settings.active_llm_api_key and settings.llm_embedding_model
+            settings.active_embedding_api_key and settings.llm_embedding_model
         )
         self._headers = {
             "Authorization": f"Bearer {settings.active_llm_api_key}",
+            "Content-Type": "application/json",
+        }
+        self._embedding_headers = {
+            "Authorization": f"Bearer {settings.active_embedding_api_key}",
             "Content-Type": "application/json",
         }
 
@@ -78,8 +82,8 @@ JSON:"""
             }
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
-                    f"{settings.llm_base_url}/embeddings",
-                    headers=self._headers,
+                    f"{settings.active_embedding_base_url}/embeddings",
+                    headers=self._embedding_headers,
                     json=payload,
                 )
                 response.raise_for_status()

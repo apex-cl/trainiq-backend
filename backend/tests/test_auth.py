@@ -151,7 +151,7 @@ async def test_change_password_wrong_current(client):
     email = f"badpw_{uuid.uuid4().hex[:8]}@test.com"
     reg = await client.post(
         "/auth/register",
-        json={"email": email, "password": "correctpassword", "name": "Bad PW"},
+        json={"email": email, "password": "correctpassword1", "name": "Bad PW"},
     )
     token = reg.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}

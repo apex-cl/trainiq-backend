@@ -1,9 +1,9 @@
 from typing import AsyncGenerator, Union
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from app.core.database import async_session, get_db
@@ -21,6 +21,23 @@ limiter = Limiter(key_func=get_remote_address)
 class ChatRequest(BaseModel):
     message: str
     extra_context: str | None = None  # z.B. Mahlzeit-Analyse-Ergebnis
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Nachricht darf nicht leer sein")
+        if len(v) > 2000:
+            raise ValueError("Nachricht darf maximal 2000 Zeichen lang sein")
+        return v
+
+    @field_validator("extra_context")
+    @classmethod
+    def validate_extra_context(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 5000:
+            raise ValueError("Kontext darf maximal 5000 Zeichen lang sein")
+        return v
 
 
 async def _stream_with_own_session(
@@ -196,18 +213,23 @@ async def get_nutrition_gaps(
     from datetime import datetime, timedelta, timezone
 
     seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    # SQL AVG direkt – keine Row-Objekte übertragen
     result = await db.execute(
-        select(NutritionLog).where(
+        select(
+            func.coalesce(func.avg(NutritionLog.calories), 0).label("avg_cal"),
+            func.coalesce(func.avg(NutritionLog.protein_g), 0).label("avg_protein"),
+            func.coalesce(func.avg(NutritionLog.carbs_g), 0).label("avg_carbs"),
+            func.coalesce(func.avg(NutritionLog.fat_g), 0).label("avg_fat"),
+        ).where(
             NutritionLog.user_id == current_user.id,
             NutritionLog.logged_at >= seven_days_ago,
         )
     )
-    logs = result.scalars().all()
-    days = len(logs) or 1  # Vermeidet Division durch Null
-    avg_cal = sum(n.calories or 0 for n in logs) / days
-    avg_protein = sum(n.protein_g or 0 for n in logs) / days
-    avg_carbs = sum(n.carbs_g or 0 for n in logs) / days
-    avg_fat = sum(n.fat_g or 0 for n in logs) / days
+    row = result.one()
+    avg_cal = float(row.avg_cal)
+    avg_protein = float(row.avg_protein)
+    avg_carbs = float(row.avg_carbs)
+    avg_fat = float(row.avg_fat)
     planner = MealPlanner()
     analysis = await planner.analyze_nutrient_gaps(
         avg_cal, avg_protein, avg_carbs, avg_fat, kalorien_ziel, protein_ziel_g

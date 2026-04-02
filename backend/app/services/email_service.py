@@ -148,6 +148,12 @@ VERIFY_EMAIL_TEMPLATE = """
 
 jinja_env = Environment(loader=BaseLoader())
 
+# Pre-compiled templates — Jinja2-Parsing einmalig beim Import, nicht bei jedem E-Mail-Versand.
+_tmpl_welcome = jinja_env.from_string(WELCOME_TEMPLATE)
+_tmpl_reset = jinja_env.from_string(RESET_TEMPLATE)
+_tmpl_weekly_report = jinja_env.from_string(WEEKLY_REPORT_TEMPLATE)
+_tmpl_verify_email = jinja_env.from_string(VERIFY_EMAIL_TEMPLATE)
+
 
 class EmailService:
     """Versendet E-Mails via SMTP."""
@@ -191,8 +197,7 @@ class EmailService:
 
     async def send_welcome(self, to_email: str, name: str):
         """Versendet eine Welcome-E-Mail nach Registrierung."""
-        template = jinja_env.from_string(WELCOME_TEMPLATE)
-        html = template.render(name=name, frontend_url=settings.frontend_url)
+        html = _tmpl_welcome.render(name=name, frontend_url=settings.frontend_url)
         await self._send(to_email, "Willkommen bei TrainIQ!", html)
 
     async def send_password_reset(
@@ -226,10 +231,8 @@ class EmailService:
         await db.flush()
 
         reset_url = f"{settings.frontend_url}/reset-password?token={token}"
-        template = jinja_env.from_string(RESET_TEMPLATE)
-        html = template.render(name=name, reset_url=reset_url)
+        html = _tmpl_reset.render(name=name, reset_url=reset_url)
         await self._send(to_email, "Passwort zurücksetzen — TrainIQ", html)
-        await db.commit()
 
         return token
 
@@ -284,8 +287,7 @@ class EmailService:
 
     async def send_weekly_report(self, to_email: str, name: str, stats: dict):
         """Versendet den wöchentlichen Report."""
-        template = jinja_env.from_string(WEEKLY_REPORT_TEMPLATE)
-        html = template.render(
+        html = _tmpl_weekly_report.render(
             name=name,
             week_start=stats.get("week_start", ""),
             completed_workouts=stats.get("completed_workouts", 0),
@@ -299,6 +301,5 @@ class EmailService:
     async def send_verification(self, to_email: str, name: str, token: str):
         """Versendet die E-Mail-Verifizierungs-E-Mail."""
         verify_url = f"{settings.frontend_url}/verify-email/{token}"
-        template = jinja_env.from_string(VERIFY_EMAIL_TEMPLATE)
-        html = template.render(name=name, verify_url=verify_url)
+        html = _tmpl_verify_email.render(name=name, verify_url=verify_url)
         await self._send(to_email, "E-Mail verifizieren — TrainIQ", html)

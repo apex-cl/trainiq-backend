@@ -29,6 +29,16 @@ class RegisterRequest(BaseModel):
     password: str
     name: str
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 2:
+            raise ValueError("Name muss mindestens 2 Zeichen lang sein")
+        if len(v) > 100:
+            raise ValueError("Name darf maximal 100 Zeichen lang sein")
+        return v
+
     @field_validator("email")
     @classmethod
     def validate_email(cls, v: str) -> str:
@@ -41,6 +51,8 @@ class RegisterRequest(BaseModel):
     def validate_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Passwort muss mindestens 8 Zeichen lang sein")
+        if not any(c.isdigit() or not c.isalpha() for c in v):
+            raise ValueError("Passwort muss mindestens eine Zahl oder ein Sonderzeichen enthalten")
         return v
 
 
@@ -58,6 +70,8 @@ class ChangePasswordRequest(BaseModel):
     def validate_new_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Neues Passwort muss mindestens 8 Zeichen lang sein")
+        if not any(c.isdigit() or not c.isalpha() for c in v):
+            raise ValueError("Passwort muss mindestens eine Zahl oder ein Sonderzeichen enthalten")
         return v
 
 
@@ -74,6 +88,8 @@ class ResetPasswordRequest(BaseModel):
     def validate_new_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Passwort muss mindestens 8 Zeichen lang sein")
+        if not any(c.isdigit() or not c.isalpha() for c in v):
+            raise ValueError("Passwort muss mindestens eine Zahl oder ein Sonderzeichen enthalten")
         return v
 
 
@@ -132,6 +148,8 @@ async def login(
     result = await db.execute(select(User).where(User.email == request_data.email))
     user = result.scalar_one_or_none()
     if not user:
+        # Dummy-check damit Timing-Angriffe zur User-Enumeration nicht möglich sind
+        verify_password("dummy", "$2b$12$dummy.hash.that.never.matches.anything.xx")
         raise HTTPException(status_code=401, detail="Ungültige Anmeldedaten")
     if not user.password_hash:
         raise HTTPException(status_code=401, detail="Bitte melde dich über Keycloak an")
@@ -196,7 +214,7 @@ async def forgot_password(
         await email_svc.send_password_reset(user.email, user.name, db)
     except Exception as e:
         logger.error(f"Password reset email failed | user={user.id} | error={e}")
-        raise HTTPException(status_code=500, detail="E-Mail konnte nicht gesendet werden.")
+        # Immer 200 zurückgeben – HTTP 500 würde verraten dass der User existiert
 
     return {"ok": True, "message": "Falls die E-Mail existiert, wurde ein Link gesendet."}
 

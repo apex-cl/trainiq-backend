@@ -31,6 +31,9 @@ class CoachAgent:
         self, user_id: str, db: AsyncSession, query: str | None = None
     ) -> str:
         """Lädt und formatiert den Kontext für den Coach."""
+        import uuid as _uuid
+        uid = _uuid.UUID(user_id) if isinstance(user_id, str) else user_id
+
         today = date.today()
         week_start = today - timedelta(days=today.weekday())
 
@@ -39,7 +42,7 @@ class CoachAgent:
         metrics_result = await db.execute(
             select(HealthMetric)
             .where(
-                HealthMetric.user_id == user_id,
+                HealthMetric.user_id == uid,
                 HealthMetric.recorded_at >= seven_days_ago,
             )
             .order_by(HealthMetric.recorded_at.desc())
@@ -83,7 +86,7 @@ class CoachAgent:
         plan_result = await db.execute(
             select(TrainingPlan)
             .where(
-                TrainingPlan.user_id == user_id,
+                TrainingPlan.user_id == uid,
                 TrainingPlan.date >= week_start,
                 TrainingPlan.date < week_start + timedelta(days=7),
             )
@@ -103,7 +106,7 @@ class CoachAgent:
         nutrition_result = await db.execute(
             select(NutritionLog)
             .where(
-                NutritionLog.user_id == user_id,
+                NutritionLog.user_id == uid,
                 NutritionLog.logged_at >= two_days_ago,
             )
             .order_by(NutritionLog.logged_at.desc())
@@ -118,7 +121,7 @@ class CoachAgent:
         # Befinden heute
         wellbeing_result = await db.execute(
             select(DailyWellbeing).where(
-                DailyWellbeing.user_id == user_id,
+                DailyWellbeing.user_id == uid,
                 DailyWellbeing.date == today,
             )
         )
@@ -131,7 +134,7 @@ class CoachAgent:
 
         # User-Ziele
         goals_result = await db.execute(
-            select(UserGoal).where(UserGoal.user_id == user_id)
+            select(UserGoal).where(UserGoal.user_id == uid)
         )
         goals = goals_result.scalars().all()
         goals_text = "  Keine Ziele gesetzt"
@@ -185,6 +188,9 @@ Ziele:
         self, message: str, user_id: str, db: AsyncSession
     ) -> AsyncGenerator[str, None]:
         """Streaming Response für Chat."""
+        import uuid as _uuid
+        uid = _uuid.UUID(user_id) if isinstance(user_id, str) else user_id
+
         logger.info(f"Coach stream started | user={user_id} | msg_len={len(message)}")
 
         if not self.llm_configured:
@@ -199,7 +205,7 @@ Ziele:
         # Chat-Verlauf laden (letzte 20 Nachrichten)
         history_result = await db.execute(
             select(Conversation)
-            .where(Conversation.user_id == user_id)
+            .where(Conversation.user_id == uid)
             .order_by(Conversation.created_at.desc())
             .limit(20)
         )
@@ -207,7 +213,7 @@ Ziele:
 
         # User-Nachricht speichern
         user_conv = Conversation(
-            user_id=user_id,
+            user_id=uid,
             role="user",
             content=message,
         )
@@ -229,7 +235,7 @@ Ziele:
 
         # Antwort speichern
         assistant_conv = Conversation(
-            user_id=user_id,
+            user_id=uid,
             role="assistant",
             content=full_response,
         )
@@ -250,13 +256,13 @@ Ziele:
 
         # Alte Conversations aufräumen (max 500 pro User)
         count_result = await db.execute(
-            select(func.count(Conversation.id)).where(Conversation.user_id == user_id)
+            select(func.count(Conversation.id)).where(Conversation.user_id == uid)
         )
         total_count = count_result.scalar() or 0
         if total_count > 500:
             oldest_result = await db.execute(
                 select(Conversation.id)
-                .where(Conversation.user_id == user_id)
+                .where(Conversation.user_id == uid)
                 .order_by(Conversation.created_at.asc())
                 .limit(total_count - 500)
             )
@@ -322,6 +328,9 @@ Ziele:
 
     async def execute_action(self, action: dict, user_id: str, db: AsyncSession):
         """Führt Coach-Actions aus."""
+        import uuid as _uuid
+        uid = _uuid.UUID(user_id) if isinstance(user_id, str) else user_id
+
         action_type = action.get("action")
 
         if action_type == "update_plan":
@@ -333,7 +342,7 @@ Ziele:
             changes = action.get("changes", {})
             result = await db.execute(
                 select(TrainingPlan).where(
-                    TrainingPlan.user_id == user_id,
+                    TrainingPlan.user_id == uid,
                     TrainingPlan.date == plan_date,
                 )
             )
@@ -352,7 +361,7 @@ Ziele:
                 return
             result = await db.execute(
                 select(TrainingPlan).where(
-                    TrainingPlan.user_id == user_id,
+                    TrainingPlan.user_id == uid,
                     TrainingPlan.date == plan_date,
                 )
             )
@@ -370,7 +379,7 @@ Ziele:
             goal_text = action.get("goal", "")
             if goal_text:
                 goal = UserGoal(
-                    user_id=user_id,
+                    user_id=uid,
                     sport="Allgemein",
                     goal_description=goal_text,
                 )
@@ -379,9 +388,11 @@ Ziele:
 
     async def get_history(self, user_id: str, db: AsyncSession) -> list[dict]:
         """Letzte 50 Conversations laden."""
+        import uuid as _uuid
+        uid = _uuid.UUID(user_id) if isinstance(user_id, str) else user_id
         result = await db.execute(
             select(Conversation)
-            .where(Conversation.user_id == user_id)
+            .where(Conversation.user_id == uid)
             .order_by(Conversation.created_at.desc())
             .limit(50)
         )
@@ -397,5 +408,7 @@ Ziele:
 
     async def clear_history(self, user_id: str, db: AsyncSession):
         """Alle Conversations löschen."""
-        await db.execute(delete(Conversation).where(Conversation.user_id == user_id))
+        import uuid as _uuid
+        uid = _uuid.UUID(user_id) if isinstance(user_id, str) else user_id
+        await db.execute(delete(Conversation).where(Conversation.user_id == uid))
         await db.flush()

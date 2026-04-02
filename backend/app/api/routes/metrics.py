@@ -1,15 +1,65 @@
+import asyncio
+import json
 from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, cast, Date as SADate
 from app.core.database import get_db
 from app.api.dependencies import get_current_user
 from app.models.user import User
 from app.models.metrics import HealthMetric, DailyWellbeing
 from app.services.recovery_scorer import RecoveryScorer
+from app.core.config import settings
 
 router = APIRouter()
+
+# ─── Redis Cache Helpers ──────────────────────────────────────────────────────
+# Singleton-Pool: einmalig pro Worker-Prozess – keine TCP-Verbindung pro Aufruf
+
+_redis_client = None  # redis.asyncio.Redis
+
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        try:
+            import redis.asyncio as aioredis
+            _redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+        except Exception:
+            return None
+    return _redis_client
+
+
+async def _cache_get(key: str) -> dict | None:
+    try:
+        r = _get_redis()
+        if r is None:
+            return None
+        raw = await r.get(key)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+async def _cache_set(key: str, value: dict, ttl: int) -> None:
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await r.set(key, json.dumps(value), ex=ttl)
+    except Exception:
+        pass
+
+
+async def _cache_del(key: str) -> None:
+    try:
+        r = _get_redis()
+        if r is None:
+            return
+        await r.delete(key)
+    except Exception:
+        pass
 
 
 class WellbeingRequest(BaseModel):
@@ -22,6 +72,13 @@ class WellbeingRequest(BaseModel):
     def validate_scores(cls, v: int) -> int:
         if not 1 <= v <= 10:
             raise ValueError("Score muss zwischen 1 und 10 liegen")
+        return v
+
+    @field_validator("pain_notes")
+    @classmethod
+    def validate_pain_notes(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 1000:
+            raise ValueError("pain_notes darf maximal 1000 Zeichen lang sein")
         return v
 
 
@@ -47,6 +104,7 @@ async def post_wellbeing(
         existing.mood_score = body.mood_score
         existing.pain_notes = body.pain_notes
         await db.flush()
+        await _cache_del(f"recovery:{current_user.id}:{today.isoformat()}")
         return {
             "id": str(existing.id),
             "date": today.isoformat(),
@@ -64,6 +122,7 @@ async def post_wellbeing(
     )
     db.add(wellbeing)
     await db.flush()
+    await _cache_del(f"recovery:{current_user.id}:{today.isoformat()}")
     return {
         "id": str(wellbeing.id),
         "date": today.isoformat(),
@@ -102,6 +161,8 @@ async def get_today(
             "sleep_quality_score": None,
             "stress_score": None,
             "steps": None,
+            "spo2": None,
+            "vo2_max": None,
             "source": "no_data",
         }
 
@@ -113,6 +174,7 @@ async def get_today(
         "stress_score": metric.stress_score,
         "steps": metric.steps,
         "spo2": metric.spo2,
+        "vo2_max": metric.vo2_max,
         "source": metric.source,
         "recorded_at": metric.recorded_at.isoformat(),
     }
@@ -123,9 +185,11 @@ async def get_week(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return health metrics for the last 7 days."""
+    """Return health metrics for the last 7 days, newest entry per day."""
     seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
 
+    # Fetch all records for the last 7 days, then group by date in Python.
+    # This is DB-agnostic (works with both PostgreSQL and SQLite for tests).
     result = await db.execute(
         select(HealthMetric)
         .where(
@@ -136,23 +200,30 @@ async def get_week(
     )
     metrics = result.scalars().all()
 
-    # Gruppiert nach Datum, jeweils neuester Eintrag pro Tag
-    by_date = {}
+    # Keep only the latest entry per calendar day
+    seen_days: dict = {}
     for m in metrics:
-        date_key = m.recorded_at.date().isoformat()
-        if date_key not in by_date:
-            by_date[date_key] = {
-                "date": date_key,
-                "hrv": m.hrv,
-                "resting_hr": m.resting_hr,
-                "sleep_duration_min": m.sleep_duration_min,
-                "sleep_quality_score": m.sleep_quality_score,
-                "stress_score": m.stress_score,
-                "steps": m.steps,
-                "source": m.source,
-            }
+        day = m.recorded_at.date() if hasattr(m.recorded_at, "date") else m.recorded_at
+        if isinstance(day, str):
+            day = date.fromisoformat(day[:10])
+        if day not in seen_days:
+            seen_days[day] = m
 
-    return list(by_date.values())
+    return [
+        {
+            "date": d.isoformat(),
+            "hrv": m.hrv,
+            "resting_hr": m.resting_hr,
+            "sleep_duration_min": m.sleep_duration_min,
+            "sleep_quality_score": m.sleep_quality_score,
+            "stress_score": m.stress_score,
+            "steps": m.steps,
+            "spo2": m.spo2,
+            "vo2_max": m.vo2_max,
+            "source": m.source,
+        }
+        for d, m in sorted(seen_days.items(), reverse=True)
+    ]
 
 
 @router.get("/recovery")
@@ -160,12 +231,19 @@ async def get_recovery(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Calculate and return the current recovery score."""
+    """Calculate and return the current recovery score. Cached in Redis for 5 min."""
+    cache_key = f"recovery:{current_user.id}:{date.today().isoformat()}"
+    cached = await _cache_get(cache_key)
+    if cached:
+        return cached
+
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
+    fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
 
-    result = await db.execute(
+    # Run both queries in parallel
+    today_q = db.execute(
         select(HealthMetric)
         .where(
             HealthMetric.user_id == current_user.id,
@@ -174,17 +252,26 @@ async def get_recovery(
         .order_by(HealthMetric.recorded_at.desc())
         .limit(1)
     )
-    metric = result.scalars().first()
+    baseline_q = db.execute(
+        select(HealthMetric)
+        .where(
+            HealthMetric.user_id == current_user.id,
+            HealthMetric.recorded_at >= fourteen_days_ago,
+        )
+        .order_by(HealthMetric.recorded_at.desc())
+        .limit(28)
+    )
+    today_result, baseline_result = await asyncio.gather(today_q, baseline_q)
+
+    metric = today_result.scalars().first()
 
     if not metric:
-        # Versuche letzte verfügbare Metrik
-        fallback_result = await db.execute(
-            select(HealthMetric)
-            .where(HealthMetric.user_id == current_user.id)
-            .order_by(HealthMetric.recorded_at.desc())
-            .limit(1)
-        )
-        metric = fallback_result.scalars().first()
+        # Fallback: last available metric (already in baseline set)
+        all_baseline = baseline_result.scalars().all()
+        metric = all_baseline[0] if all_baseline else None
+        baseline_metrics = all_baseline
+    else:
+        baseline_metrics = baseline_result.scalars().all()
 
     if not metric:
         return {
@@ -204,18 +291,6 @@ async def get_recovery(
         "resting_hr": metric.resting_hr,
     }
 
-    # Persönliche Baseline aus letzten 14 Tagen berechnen
-    fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
-    baseline_result = await db.execute(
-        select(HealthMetric)
-        .where(
-            HealthMetric.user_id == current_user.id,
-            HealthMetric.recorded_at >= fourteen_days_ago,
-        )
-        .order_by(HealthMetric.recorded_at.desc())
-        .limit(28)
-    )
-    baseline_metrics = baseline_result.scalars().all()
     baseline_data = [
         {
             "hrv": m.hrv,
@@ -227,5 +302,9 @@ async def get_recovery(
     ]
     user_baseline = RecoveryScorer.compute_baseline(baseline_data)
 
-    result = scorer.calculate_recovery_score(metric_dict, user_baseline=user_baseline)
-    return {**result, "baseline": user_baseline}
+    response = scorer.calculate_recovery_score(metric_dict, user_baseline=user_baseline)
+    response["baseline"] = user_baseline
+
+    # Cache for 5 minutes — recovery changes at most when new metrics arrive
+    await _cache_set(cache_key, response, ttl=300)
+    return response
