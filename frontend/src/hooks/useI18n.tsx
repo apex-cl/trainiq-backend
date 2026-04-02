@@ -24,7 +24,6 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const setLocale = useCallback((newLocale: Locale) => {
     saveLocale(newLocale);
     setLocaleState(newLocale);
-    window.location.reload();
   }, []);
 
   const t = useCallback(

@@ -137,31 +137,35 @@ export function useCoach() {
       if (reader) {
         let buffer = "";
         let streamDone = false;
-        while (!streamDone) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+        try {
+          while (!streamDone) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
 
-          // SSE Events aus Buffer extrahieren (getrennt durch \n\n)
-          const events = buffer.split("\n\n");
-          buffer = events.pop() ?? ""; // Letztes (unvollständiges) Event zurückbehalten
+            // SSE Events aus Buffer extrahieren (getrennt durch \n\n)
+            const events = buffer.split("\n\n");
+            buffer = events.pop() ?? ""; // Letztes (unvollständiges) Event zurückbehalten
 
-          for (const event of events) {
-            // Mehrzeilige SSE-Chunks zusammenführen: "data: line1\ndata: line2" → "line1\nline2"
-            const dataLines = event
-              .split("\n")
-              .filter((l) => l.startsWith("data: "))
-              .map((l) => l.slice(6));
+            for (const event of events) {
+              // Mehrzeilige SSE-Chunks zusammenführen: "data: line1\ndata: line2" → "line1\nline2"
+              const dataLines = event
+                .split("\n")
+                .filter((l) => l.startsWith("data: "))
+                .map((l) => l.slice(6));
 
-            const data = dataLines.join("\n");
+              const data = dataLines.join("\n");
 
-            if (!data || data === "[DONE]") { streamDone = true; break; }
+              if (!data || data === "[DONE]") { streamDone = true; break; }
 
-            full += data;
-            setMessages((prev) =>
-              prev.map((m) => (m.id === assistantId ? { ...m, content: full } : m))
-            );
+              full += data;
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantId ? { ...m, content: full } : m))
+              );
+            }
           }
+        } finally {
+          reader.cancel();
         }
       }
     } catch (err: any) {
@@ -297,32 +301,36 @@ export function useCoach() {
       if (reader) {
         let buffer = "";
         let streamDone = false;
-        while (!streamDone) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+        try {
+          while (!streamDone) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
 
-          // SSE Events aus Buffer extrahieren (getrennt durch \n\n)
-          const events = buffer.split("\n\n");
-          buffer = events.pop() ?? "";
+            // SSE Events aus Buffer extrahieren (getrennt durch \n\n)
+            const events = buffer.split("\n\n");
+            buffer = events.pop() ?? "";
 
-          for (const event of events) {
-            const dataLines = event
-              .split("\n")
-              .filter((l) => l.startsWith("data: "))
-              .map((l) => l.slice(6));
+            for (const event of events) {
+              const dataLines = event
+                .split("\n")
+                .filter((l) => l.startsWith("data: "))
+                .map((l) => l.slice(6));
 
-            const data = dataLines.join("\n");
+              const data = dataLines.join("\n");
 
-            if (!data || data === "[DONE]") { streamDone = true; break; }
+              if (!data || data === "[DONE]") { streamDone = true; break; }
 
-            full += data;
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, content: full } : m
-              )
-            );
+              full += data;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, content: full } : m
+                )
+              );
+            }
           }
+        } finally {
+          reader.cancel();
         }
       }
     } catch (err: any) {

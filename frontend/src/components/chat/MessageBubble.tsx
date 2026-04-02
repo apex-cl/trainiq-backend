@@ -7,6 +7,7 @@ interface MessageBubbleProps {
 }
 
 function formatContent(text: string): React.ReactNode[] {
+  if (!text) return [];
   const lines = text.split("\n");
   const nodes: React.ReactNode[] = [];
 
@@ -102,7 +103,10 @@ export default function MessageBubble({ role, content, created_at }: MessageBubb
   return (
     <div className={`flex ${isCoach ? "justify-start" : "justify-end"} mb-3`}>
       {isCoach && (
-        <div className="w-7 h-7 flex-shrink-0 border border-blue-500 flex items-center justify-center font-mono text-xs text-blue-400 mr-2 mt-1">
+        <div
+          className="w-7 h-7 flex-shrink-0 border border-blue-500 flex items-center justify-center font-mono text-xs text-blue-400 mr-2 mt-1"
+          aria-label="Coach"
+        >
           C
         </div>
       )}

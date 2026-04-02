@@ -17,6 +17,7 @@ export interface HealthMetric {
   stress_score: number | null;
   spo2: number | null;
   steps: number | null;
+  vo2_max: number | null;
   source: string;
   created_at: string;
 }

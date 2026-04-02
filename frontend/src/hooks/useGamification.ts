@@ -32,7 +32,7 @@ export function useStreak() {
   const streak = useQuery({
     queryKey: ["streak"],
     queryFn: () => api.get("/training/streak").then((r) => r.data as StreakData).catch(() => DEFAULT_STREAK),
-    staleTime: 1000 * 60 * 10,
+    staleTime: 1000 * 60 * 30, // 30 min — streak changes infrequently
   });
 
   return {
@@ -45,7 +45,7 @@ export function useAchievements() {
   const achievements = useQuery({
     queryKey: ["achievements"],
     queryFn: () => api.get("/training/achievements").then((r) => r.data as Achievement[]).catch(() => DEFAULT_ACHIEVEMENTS),
-    staleTime: 1000 * 60 * 10,
+    staleTime: 1000 * 60 * 30, // 30 min — aligns with 10-min server cache + margin
   });
 
   return {

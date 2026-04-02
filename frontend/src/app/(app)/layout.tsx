@@ -5,6 +5,7 @@ import Link from "next/link";
 import { LayoutGrid, Dumbbell, MessageCircle, UtensilsCrossed, Activity, Settings } from "lucide-react";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { OfflineIndicator } from "@/components/OfflineIndicator";
+import { WatchRealtimeSync } from "@/components/WatchRealtimeSync";
 
 const tabs = [
   { href: "/dashboard",  icon: LayoutGrid },
@@ -21,6 +22,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-bg flex flex-col max-w-sm mx-auto">
       <OfflineIndicator />
+      <WatchRealtimeSync />
       <main className="flex-1 pb-[64px]">
         <ErrorBoundary>
           {children}

@@ -1,6 +1,7 @@
 "use client";
 import { useState, useCallback, useEffect } from "react";
 import api from "@/lib/api";
+import { useWatchRealtime } from "@/hooks/useWatchRealtime";
 
 export interface WatchConnection {
   provider: string;
@@ -83,6 +84,22 @@ export function useWatch() {
       setLoading(false);
     }
   }, []);
+
+  // Echtzeit: last_synced_at aktualisieren wenn neues Event eintrifft
+  const { lastEvent } = useWatchRealtime();
+  useEffect(() => {
+    if (!lastEvent || lastEvent.event !== "activity_synced" || !lastEvent.provider) return;
+    const now = new Date().toISOString();
+    setStatus((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        connected: prev.connected.map((c) =>
+          c.provider === lastEvent.provider ? { ...c, last_synced_at: now } : c
+        ),
+      };
+    });
+  }, [lastEvent]);
 
   const manualInput = useCallback(async (metrics: {
     hrv?: number;

@@ -20,10 +20,12 @@ export default function TrainingPage() {
   const selectedPlan = week.find((p: { date: string }) => p.date === selected);
 
   const handleComplete = (id: string) => {
+    if (id.startsWith("empty-")) return;
     complete(id);
   };
 
   const handleSkipConfirm = (id: string) => {
+    if (id.startsWith("empty-")) { setShowSkip(false); return; }
     skip({ id, reason: skipReason });
     setShowSkip(false);
   };

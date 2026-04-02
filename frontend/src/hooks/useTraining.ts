@@ -46,7 +46,7 @@ export function useTraining() {
         return generateEmptyWeek();
       }
     },
-    staleTime: 1000 * 60 * 5,
+    staleTime: 1000 * 60 * 10, // 10 min — aligns with backend plan cache TTL
   });
 
   const complete = useMutation({

@@ -7,6 +7,20 @@ export function useOffline() {
   const [syncing, setSyncing] = useState(false);
   const [syncCount, setSyncCount] = useState(0);
 
+  const handleSync = useCallback(async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const count = await syncQueuedActions();
+      setSyncCount(count);
+      if (count > 0) {
+        setTimeout(() => setSyncCount(0), 3000);
+      }
+    } finally {
+      setSyncing(false);
+    }
+  }, [syncing]);
+
   useEffect(() => {
     setIsOffline(!navigator.onLine);
 
@@ -26,21 +40,7 @@ export function useOffline() {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
-  }, []);
-
-  const handleSync = useCallback(async () => {
-    if (syncing) return;
-    setSyncing(true);
-    try {
-      const count = await syncQueuedActions();
-      setSyncCount(count);
-      if (count > 0) {
-        setTimeout(() => setSyncCount(0), 3000);
-      }
-    } finally {
-      setSyncing(false);
-    }
-  }, [syncing]);
+  }, [handleSync]);
 
   return { isOffline, syncing, syncCount, manualSync: handleSync };
 }

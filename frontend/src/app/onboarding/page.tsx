@@ -32,41 +32,103 @@ export default function OnboardingPage() {
   const [weightKg, setWeightKg] = useState("");
   const [heightCm, setHeightCm] = useState("");
 
-  // Strava State
-  const [stravaAvailable, setStravaAvailable] = useState(false);
-  const [stravaConnected, setStravaConnected] = useState(false);
+  // Watch State
+  const [connectedProviders, setConnectedProviders] = useState<Set<string>>(new Set());
+  const [connectingProvider, setConnectingProvider] = useState<string | null>(null);
+  const [providerMsg, setProviderMsg] = useState<string>("");
+  // Garmin modal
+  const [garminModal, setGarminModal] = useState(false);
+  const [garminEmail, setGarminEmail] = useState("");
+  const [garminPassword, setGarminPassword] = useState("");
+  const [garminLoading, setGarminLoading] = useState(false);
+  const [garminError, setGarminError] = useState("");
+  // File upload modal
+  const [uploadModal, setUploadModal] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState("");
 
   useEffect(() => {
-    // Check if Strava is available in backend config
     const checkStatus = async () => {
       try {
         const resp = await api.get("/watch/status");
-        setStravaAvailable(resp.data.strava_available);
-        const isConnected = resp.data.connected.some((c: any) => c.provider === "strava");
-        setStravaConnected(isConnected);
-      } catch (err) {
-        console.error("Watch status error", err);
+        const ids = new Set<string>(
+          (resp.data.connected || []).map((c: { provider: string }) => c.provider)
+        );
+        setConnectedProviders(ids);
+      } catch {
+        // Ignore
       }
     };
     checkStatus();
 
-    // Check if coming back from OAuth redirect
-    if (typeof window !== "undefined" && window.location.search.includes("strava=connected")) {
-      setStravaConnected(true);
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const provider = params.get("provider_connected");
+      if (provider) setConnectedProviders((prev) => new Set(Array.from(prev).concat(provider)));
+      else if (window.location.search.includes("strava=connected"))
+        setConnectedProviders((prev) => new Set(Array.from(prev).concat("strava")));
     }
   }, []);
 
-  const handleStravaConnect = async () => {
-    setLoading(true);
+  const ONBOARDING_PROVIDERS = [
+    { id: "strava", label: "STRAVA",       type: "oauth" as const,       hint: "gratis unter strava.com/settings/api" },
+    { id: "garmin", label: "GARMIN",       type: "credentials" as const, hint: "Garmin Connect E-Mail + Passwort" },
+    { id: "polar",  label: "POLAR",        type: "file_upload" as const, hint: "GPX aus sport.polar.com exportieren" },
+    { id: "apple",  label: "APPLE HEALTH", type: "file_upload" as const, hint: "GPX aus iOS Health exportieren" },
+  ] as const;
+
+  const handleProviderClick = async (p: typeof ONBOARDING_PROVIDERS[number]) => {
+    if (p.type === "credentials") { setGarminModal(true); return; }
+    if (p.type === "file_upload") { setUploadModal(p.id); setUploadFile(null); setUploadMsg(""); return; }
+    // OAuth
+    setConnectingProvider(p.id);
     try {
       const resp = await api.get("/watch/strava/connect");
-      if (resp.data.auth_url) {
-        window.location.href = resp.data.auth_url;
-      }
-    } catch (err) {
-      console.error("Strava connect error", err);
+      if (resp.data.auth_url) window.location.href = resp.data.auth_url;
+    } catch {
+      setProviderMsg("Strava — gratis Key unter strava.com/settings/api eintragen.");
+      setTimeout(() => setProviderMsg(""), 4000);
     } finally {
-      setLoading(false);
+      setConnectingProvider(null);
+    }
+  };
+
+  const handleGarminLogin = async () => {
+    if (!garminEmail || !garminPassword) return;
+    setGarminLoading(true);
+    setGarminError("");
+    try {
+      await api.post("/watch/garmin/login", { email: garminEmail, password: garminPassword });
+      setConnectedProviders((prev) => new Set(Array.from(prev).concat("garmin")));
+      setGarminModal(false);
+      setGarminEmail("");
+      setGarminPassword("");
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "";
+      setGarminError(detail || "Login fehlgeschlagen. Prüfe E-Mail und Passwort.");
+    } finally {
+      setGarminLoading(false);
+    }
+  };
+
+  const handleFileUpload = async () => {
+    if (!uploadFile || !uploadModal) return;
+    setUploadLoading(true);
+    setUploadMsg("");
+    try {
+      const form = new FormData();
+      form.append("provider", uploadModal);
+      form.append("file", uploadFile);
+      const resp = await api.post("/watch/upload-gpx", form, { headers: { "Content-Type": "multipart/form-data" } });
+      setConnectedProviders((prev) => new Set(Array.from(prev).concat(uploadModal)));
+      setUploadMsg(`✓ ${resp.data.activity_name} importiert`);
+      setTimeout(() => setUploadModal(null), 2000);
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "";
+      setUploadMsg(`! ${detail || "Upload fehlgeschlagen."}`);
+    } finally {
+      setUploadLoading(false);
     }
   };
 
@@ -84,8 +146,7 @@ export default function OnboardingPage() {
         fitness_level: fitnessLevel,
       });
       setStep(3);
-    } catch (err) {
-      console.error("Goals API error", err);
+    } catch {
       setStep(3); // Continue anyway in dev mode or show error
     } finally {
       setLoading(false);
@@ -230,30 +291,30 @@ export default function OnboardingPage() {
             <p className="text-sm font-sans text-textDim mt-1">Optional — du kannst auch manuell Daten eingeben.</p>
           </div>
           <div className="flex flex-col gap-3">
-            {/* Strava — funktioniert */}
-            {stravaAvailable && (
-              <button
-                onClick={handleStravaConnect}
-                disabled={loading || stravaConnected}
-                className={`w-full border text-xs tracking-widest uppercase font-sans py-3.5 transition-colors text-left px-4 disabled:opacity-40 ${
-                  stravaConnected ? "border-blue text-blue" : "border-border text-textMain hover:border-blue hover:text-blue"
-                }`}
-              >
-                <span className="text-textDim mr-2">›</span> STRAVA
-                {stravaConnected && <span className="float-right text-[10px] text-blue">✓ VERBUNDEN</span>}
-              </button>
+            {providerMsg && (
+              <p className="text-xs font-sans text-blue tracking-widest py-1">› {providerMsg}</p>
             )}
-
-            {/* Noch nicht verfügbare Geräte */}
-            {["GARMIN", "APPLE HEALTH", "POLAR"].map((name) => (
-              <div
-                key={name}
-                className="w-full border border-border text-xs tracking-widest uppercase font-sans py-3.5 text-left px-4 opacity-40 flex justify-between items-center"
-              >
-                <span><span className="text-textDim mr-2">›</span> {name}</span>
-                <span className="text-[10px] text-textDim tracking-widest">BALD</span>
-              </div>
-            ))}
+            {ONBOARDING_PROVIDERS.map((p) => {
+              const isConnected = connectedProviders.has(p.id);
+              const isConnecting = connectingProvider === p.id;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => !isConnected && handleProviderClick(p)}
+                  disabled={isConnected || isConnecting}
+                  className={`w-full border text-xs tracking-widest uppercase font-sans py-3 transition-colors text-left px-4 flex flex-col disabled:cursor-default ${
+                    isConnected ? "border-blue text-blue" : "border-border text-textMain hover:border-blue hover:text-blue"
+                  }`}
+                >
+                  <span className="flex justify-between w-full">
+                    <span><span className="text-textDim mr-2">›</span> {p.label}</span>
+                    {isConnected && <span className="text-[10px] text-blue">✓ VERBUNDEN</span>}
+                    {isConnecting && <span className="text-[10px] text-textDim">...</span>}
+                  </span>
+                  {!isConnected && <span className="text-[9px] text-textDim mt-0.5 pl-4">{p.hint}</span>}
+                </button>
+              );
+            })}
           </div>
           <div className="flex flex-col gap-3 mt-4">
              <button onClick={() => setStep(2)} className="w-full text-textDim text-xs tracking-widest uppercase font-sans py-2 hover:text-textMain transition-colors">
@@ -262,6 +323,64 @@ export default function OnboardingPage() {
              <button onClick={finish} disabled={loading} className="w-full border border-border text-textDim text-xs tracking-widest uppercase font-sans py-3 hover:text-textMain hover:border-textMain transition-colors disabled:opacity-40">
                 {loading ? "Wird eingerichtet..." : "Anbindung überspringen"}
              </button>
+          </div>
+        </div>
+      )}
+
+      {/* Garmin Login Modal */}
+      {garminModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center px-6">
+          <div className="bg-bg border border-border w-full max-w-sm p-6 flex flex-col gap-4">
+            <p className="font-pixel text-textMain text-lg">GARMIN LOGIN</p>
+            <p className="text-xs font-sans text-textDim">Deine Garmin-Connect-Zugangsdaten. Wir speichern nur sichere Tokens — nie dein Passwort.</p>
+            <div className="border border-border px-3 py-2">
+              <p className="text-[10px] tracking-widest uppercase text-textDim font-sans mb-1">E-Mail</p>
+              <input type="email" value={garminEmail} onChange={(e) => setGarminEmail(e.target.value)}
+                className="w-full bg-transparent text-sm font-sans text-textMain outline-none" autoComplete="email" />
+            </div>
+            <div className="border border-border px-3 py-2">
+              <p className="text-[10px] tracking-widest uppercase text-textDim font-sans mb-1">Passwort</p>
+              <input type="password" value={garminPassword} onChange={(e) => setGarminPassword(e.target.value)}
+                className="w-full bg-transparent text-sm font-sans text-textMain outline-none" autoComplete="current-password"
+                onKeyDown={(e) => e.key === "Enter" && handleGarminLogin()} />
+            </div>
+            {garminError && <p className="text-xs font-sans text-danger">! {garminError}</p>}
+            <div className="flex gap-3">
+              <button onClick={() => { setGarminModal(false); setGarminError(""); }}
+                className="flex-1 border border-border text-textDim text-xs uppercase tracking-widest font-sans py-2.5">Abbrechen</button>
+              <button onClick={handleGarminLogin} disabled={garminLoading || !garminEmail || !garminPassword}
+                className="flex-1 border border-blue text-blue text-xs uppercase tracking-widest font-sans py-2.5 hover:bg-blueDim disabled:opacity-40">
+                {garminLoading ? "Verbinde..." : "› Anmelden"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* File Upload Modal */}
+      {uploadModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center px-6">
+          <div className="bg-bg border border-border w-full max-w-sm p-6 flex flex-col gap-4">
+            <p className="font-pixel text-textMain text-lg">{uploadModal === "polar" ? "POLAR" : "APPLE HEALTH"}</p>
+            <p className="text-xs font-sans text-textDim">
+              {uploadModal === "polar"
+                ? "Öffne sport.polar.com › Training › Aktivität › Export GPX und lade die Datei hoch."
+                : "Exportiere eine GPX-Datei aus deiner iOS Health App oder einer kompatiblen App."}
+            </p>
+            <label className="border border-border px-4 py-5 flex flex-col items-center gap-2 cursor-pointer hover:border-blue transition-colors">
+              <span className="text-xs font-sans text-textDim tracking-widest uppercase">{uploadFile ? uploadFile.name : "GPX / TCX Datei wählen"}</span>
+              <input type="file" accept=".gpx,.tcx,.xml" className="hidden"
+                onChange={(e) => { setUploadFile(e.target.files?.[0] ?? null); setUploadMsg(""); }} />
+            </label>
+            {uploadMsg && <p className={`text-xs font-sans ${uploadMsg.startsWith("!") ? "text-danger" : "text-blue"}`}>{uploadMsg}</p>}
+            <div className="flex gap-3">
+              <button onClick={() => setUploadModal(null)}
+                className="flex-1 border border-border text-textDim text-xs uppercase tracking-widest font-sans py-2.5">Abbrechen</button>
+              <button onClick={handleFileUpload} disabled={uploadLoading || !uploadFile}
+                className="flex-1 border border-blue text-blue text-xs uppercase tracking-widest font-sans py-2.5 hover:bg-blueDim disabled:opacity-40">
+                {uploadLoading ? "Importiere..." : "› Importieren"}
+              </button>
+            </div>
           </div>
         </div>
       )}

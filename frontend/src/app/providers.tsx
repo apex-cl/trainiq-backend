@@ -5,7 +5,17 @@ import { useAuthStore } from "@/store/auth";
 import { I18nProvider } from "@/hooks/useI18n";
 
 export default function Providers({ children }: { children: React.ReactNode }) {
-  const [qc] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: 1 } } }));
+  const [qc] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: 1,
+        // Don't refetch when window regains focus — avoids waterfall on tab switch
+        refetchOnWindowFocus: false,
+        // Keep data in cache for 10 minutes after component unmounts
+        gcTime: 1000 * 60 * 10,
+      },
+    },
+  }));
   const init = useAuthStore((s) => s.init);
 
   useEffect(() => {

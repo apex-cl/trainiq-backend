@@ -2,7 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -43,7 +43,7 @@ services:
       KC_HOSTNAME_STRICT_HTTPS: "false"
       KC_PROXY: edge
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD muss in .env gesetzt sein}
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://keycloak-postgres:5432/${KEYCLOAK_DB_NAME:-keycloak}
       KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
@@ -56,7 +56,7 @@ services:
       keycloak-postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/realms/master || exit 1"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /realms/master HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 && grep -q '200 OK' <&3 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -66,7 +66,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -79,7 +79,8 @@ services:
 
   migrate:
     build: ./backend
-    command: alembic upgrade head
+    pull_policy: build
+    command: sh -c "alembic downgrade base && alembic upgrade head"
     environment:
       - DATABASE_URL=${DATABASE_URL}
     depends_on:
@@ -92,6 +93,7 @@ services:
 
   backend:
     build: ./backend
+    pull_policy: build
     ports:
       - "8000:8000"
     depends_on:
@@ -103,12 +105,13 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --loop uvloop --http h11
     env_file: .env
     restart: unless-stopped
 
   scheduler:
     build: ./backend
+    pull_policy: build
     depends_on:
       postgres:
         condition: service_healthy
@@ -124,6 +127,7 @@ services:
 
   worker:
     build: ./backend
+    pull_policy: build
     depends_on:
       postgres:
         condition: service_healthy
@@ -138,7 +142,10 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      target: base
+    pull_policy: build
     ports:
       - "3000:3000"
     depends_on:
@@ -148,7 +155,13 @@ services:
       - frontend_node_modules:/app/node_modules
     environment:
       - NODE_ENV=development
-    command: sh -c "npm install && npm run dev"
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost/api}
+      - NEXT_PUBLIC_VAPID_KEY=${VAPID_PUBLIC_KEY:-}
+      - NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}
+      - BACKEND_URL=http://backend:8000
+    command: sh -c "npm ci --legacy-peer-deps && npm run dev"
+    working_dir: /app
+    user: root
     env_file: .env
     restart: unless-stopped
 

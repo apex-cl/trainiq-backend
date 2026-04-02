@@ -36,6 +36,7 @@ export default function DashboardPage() {
   const { data: nutritionData, isLoading: nutritionLoading } = useQuery({
     queryKey: ["nutrition-today"],
     queryFn: () => api.get("/nutrition/today").then(r => r.data).catch(() => null),
+    staleTime: 1000 * 60 * 5,
   });
 
   const nutTotals = nutritionData?.totals ?? EMPTY_NUTRITION;
@@ -99,7 +100,6 @@ export default function DashboardPage() {
         <span className="font-pixel text-blue text-xl">TRAINIQ</span>
         <div className="flex items-center gap-3">
           <StreakIndicator />
-          <span className="text-xs font-mono text-textDim tracking-wider">{dateStr}</span>
         </div>
       </div>
 
@@ -205,7 +205,7 @@ export default function DashboardPage() {
             ].map((n, i) => (
               <div key={i} className="flex items-center gap-3 mb-3">
                 <span className="text-xs font-sans text-textDim w-16 tracking-wider uppercase">{n.label}</span>
-                <div className="bar-track flex-1"><div className={`bar-fill ${n.color}`} style={{ width: `${Math.min(100, (n.val / n.target) * 100)}%` }} /></div>
+                <div className="bar-track flex-1"><div className={`bar-fill ${n.color}`} style={{ width: `${n.target > 0 ? Math.min(100, (n.val / n.target) * 100) : 0}%` }} /></div>
                 <span className="font-pixel text-textDim text-sm whitespace-nowrap" style={{ fontSize: 13 }}>{n.unit}</span>
               </div>
             ))}

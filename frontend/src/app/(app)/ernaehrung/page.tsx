@@ -23,6 +23,7 @@ export default function ErnaehrungPage() {
   const { data: nutritionData } = useQuery({
     queryKey: ["nutrition-today"],
     queryFn: () => api.get("/nutrition/today").then(r => r.data),
+    staleTime: 1000 * 60 * 5,
   });
 
   const logs   = Array.isArray(nutritionData?.logs)   ? nutritionData.logs   : [];
@@ -37,6 +38,8 @@ export default function ErnaehrungPage() {
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    // Input sofort zurücksetzen damit dieselbe Datei erneut ausgewählt werden kann
+    e.target.value = "";
     if (!file) {
       setUploadError("Keine Datei ausgewählt.");
       return;
@@ -51,9 +54,8 @@ export default function ErnaehrungPage() {
       const { data } = await api.post("/nutrition/upload", form, { headers: { "Content-Type": "multipart/form-data" } });
       setUploadedMeal(data);
       qc.invalidateQueries({ queryKey: ["nutrition-today"] });
-    } catch (err) {
+    } catch {
       setUploadError("Upload fehlgeschlagen. Bitte versuche es erneut.");
-      console.error("Upload error", err);
     } finally {
       setUploading(false);
     }
@@ -148,7 +150,7 @@ export default function ErnaehrungPage() {
             <span className={`text-xs font-sans w-16 tracking-wider uppercase ${m.missing ? "text-blue" : "text-textDim"}`}>
               {m.missing ? "●" : " "} {m.label}
             </span>
-            <div className="bar-track flex-1"><div className={`bar-fill ${m.color}`} style={{ width: `${Math.min(100, (m.val / m.target) * 100)}%` }} /></div>
+            <div className="bar-track flex-1"><div className={`bar-fill ${m.color}`} style={{ width: `${m.target > 0 ? Math.min(100, (m.val / m.target) * 100) : 0}%` }} /></div>
             <span className="font-pixel text-textDim whitespace-nowrap" style={{ fontSize: 13 }}>{m.unit}</span>
           </div>
         ))}

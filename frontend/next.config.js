@@ -68,6 +68,23 @@ const withPWA = require("@ducanh2912/next-pwa").default({
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  compress: true,
+  poweredByHeader: false,
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "X-DNS-Prefetch-Control", value: "on" },
+        ],
+      },
+      {
+        // Aggressive caching for static assets (Next already does _next/static)
+        source: "/manifest.json",
+        headers: [{ key: "Cache-Control", value: "public, max-age=86400, stale-while-revalidate=3600" }],
+      },
+    ];
+  },
   async rewrites() {
     return [
       {

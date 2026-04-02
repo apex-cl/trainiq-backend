@@ -7,29 +7,24 @@ import { useAuthStore } from "@/store/auth";
 
 export default function RegisterPage() {
   const router = useRouter();
+  const setAuth = useAuthStore((s) => s.setAuth);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const handleKeycloakRegister = async () => {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
     setError("");
     setLoading(true);
     try {
-      const { data } = await api.get("/auth/keycloak-register-url");
-      window.location.href = data.register_url;
-    } catch {
-      setError("Keycloak-Registrierung konnte nicht gestartet werden.");
-      setLoading(false);
-    }
-  };
-
-  const handleKeycloakLogin = async () => {
-    setError("");
-    setLoading(true);
-    try {
-      const { data } = await api.get("/auth/keycloak-login-url");
-      window.location.href = data.auth_url;
-    } catch {
-      setError("Keycloak-Login konnte nicht gestartet werden.");
+      const { data } = await api.post("/auth/register", { name, email, password });
+      setAuth(data.access_token, data.user);
+      router.push("/onboarding");
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Registrierung fehlgeschlagen.");
+    } finally {
       setLoading(false);
     }
   };
@@ -44,19 +39,52 @@ export default function RegisterPage() {
 
         {error && <p className="text-xs font-sans text-danger tracking-wider mb-4">! {error}</p>}
 
-        <div className="flex flex-col gap-4">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <div className="border border-border">
+            <input
+              type="text"
+              placeholder="Dein Name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              autoComplete="name"
+              className="w-full px-4 py-3 bg-transparent text-sm font-sans text-textMain placeholder-textDim outline-none"
+            />
+          </div>
+          <div className="border border-border">
+            <input
+              type="email"
+              placeholder="E-Mail-Adresse"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              autoComplete="email"
+              className="w-full px-4 py-3 bg-transparent text-sm font-sans text-textMain placeholder-textDim outline-none"
+            />
+          </div>
+          <div className="border border-border">
+            <input
+              type="password"
+              placeholder="Passwort (min. 8 Zeichen)"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              autoComplete="new-password"
+              className="w-full px-4 py-3 bg-transparent text-sm font-sans text-textMain placeholder-textDim outline-none"
+            />
+          </div>
           <button
-            onClick={handleKeycloakRegister}
+            type="submit"
             disabled={loading}
             className="w-full border border-blue text-blue text-xs tracking-widest uppercase font-sans py-3.5 hover:bg-blueDim transition-colors disabled:opacity-50"
           >
-            {loading ? "..." : "› Mit Keycloak registrieren"}
+            {loading ? "..." : "› Konto erstellen"}
           </button>
-        </div>
+        </form>
 
         <p className="text-xs font-sans text-textDim text-center mt-6">
           Schon ein Konto?{" "}
-          <button onClick={handleKeycloakLogin} className="text-blue hover:underline">Einloggen</button>
+          <Link href="/login" className="text-blue hover:underline">Einloggen</Link>
         </p>
       </div>
     </div>

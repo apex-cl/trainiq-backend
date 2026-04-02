@@ -2,6 +2,7 @@ import axios from "axios";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost/api",
+  timeout: 30000, // 30s — prevents UI from hanging on unresponsive backend
 });
 
 api.interceptors.request.use((config) => {
