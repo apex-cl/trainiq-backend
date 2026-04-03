@@ -33,6 +33,9 @@ langchain-core==0.3.83
 pyotp>=2.9.0,<3.0.0
 stripe>=8.0.0,<9.0.0
 orjson>=3.9.0,<4.0.0
+defusedxml>=0.7.0
 # Watch integrations (no enterprise API key required)
 garminconnect>=0.3.0
 curl_cffi>=0.7.0
+# FIT/TCX/GPX Datei-Import (kein API-Key nötig)
+fitparse==1.2.0

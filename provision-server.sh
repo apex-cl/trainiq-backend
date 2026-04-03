@@ -183,9 +183,9 @@ ENV_SETUP
 echo ">> Docker Container starten..."
 remote "bash -s" <<DEPLOY
 cd "$APP_DIR"
-docker compose -f docker-compose.prod.yml pull 2>/dev/null || true
-docker compose -f docker-compose.prod.yml build
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.backend.yml pull 2>/dev/null || true
+docker compose -f docker-compose.backend.yml build
+docker compose -f docker-compose.backend.yml up -d
 DEPLOY
 
 # === 10. Health Check ===
@@ -211,7 +211,7 @@ echo "     → DOMAIN, ADMIN_EMAIL setzen"
 echo "     → SENTRY_DSN setzen (optional)"
 echo "     → S3_BACKUP_BUCKET setzen (optional)"
 echo "  3. SSL aktivieren: cd $APP_DIR && ./init-letsencrypt.sh"
-echo "  4. Logs prüfen:   docker compose -f docker-compose.prod.yml logs -f"
+echo "  4. Logs prüfen:   docker compose -f docker-compose.backend.yml logs -f"
 echo ""
 echo "Firewall Status:"
 remote "ufw status" 2>/dev/null || echo "  (konnte nicht abgerufen werden)"

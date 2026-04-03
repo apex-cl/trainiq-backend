@@ -13,21 +13,17 @@ from app.core.database import async_session
 from app.models.user import User
 from app.models.conversation import Conversation
 from app.services.coach_prompts import get_detection_prompt
+from app.core.redis import get_redis
 
 
 # Mindest-Abstand zwischen zwei autonomen Aktionen pro User
 COOLDOWN_HOURS = 6
 COOLDOWN_KEY_PREFIX = "autonomous_monitor_last_action:"
 
-_redis_client: aioredis.Redis | None = None
-
 
 def _get_redis() -> aioredis.Redis:
-    """Singleton Redis-Verbindung."""
-    global _redis_client
-    if _redis_client is None:
-        _redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
-    return _redis_client
+    """Shared Redis-Verbindung."""
+    return get_redis()
 
 
 async def _is_in_cooldown(user_id: str) -> bool:

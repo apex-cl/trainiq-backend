@@ -17,7 +17,7 @@ PROVIDERS = [
 ]
 
 PROVIDER_CONNECT_URLS = {
-    "garmin": "/watch/garmin/connect",
+    # garmin uses direct credential login — no external API key needed → always 200
     "polar": "/watch/polar/connect",
     "wahoo": "/watch/wahoo/connect",
     "fitbit": "/watch/fitbit/connect",
@@ -29,13 +29,6 @@ PROVIDER_CONNECT_URLS = {
     "samsung": "/watch/samsung/connect",
     "googlefit": "/watch/googlefit/connect",
 }
-
-
-@pytest.mark.asyncio
-async def test_strava_connect_returns_503_when_not_configured(client, auth_headers):
-    """Strava connect should return 503 when no client ID is configured."""
-    resp = await client.get("/watch/strava/connect", headers=auth_headers)
-    assert resp.status_code == 503
 
 
 @pytest.mark.parametrize("provider", list(PROVIDER_CONNECT_URLS.keys()))
@@ -55,7 +48,6 @@ async def test_watch_status_includes_all_providers(client, auth_headers):
     resp = await client.get("/watch/status", headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert "strava_available" in data
     assert "garmin_available" in data
     assert "polar_available" in data
 
@@ -117,13 +109,6 @@ async def test_watch_manual_hrv_too_high(client, auth_headers):
 
 
 @pytest.mark.asyncio
-async def test_strava_disconnect_no_connection(client, auth_headers):
-    """Disconnecting Strava when no connection exists should handle gracefully."""
-    resp = await client.post("/watch/strava/disconnect", headers=auth_headers)
-    assert resp.status_code in [200, 404]
-
-
-@pytest.mark.asyncio
 async def test_sync_no_connection_returns_no_provider(client, auth_headers):
     """Sync without any connected device returns no_provider or empty."""
     resp = await client.post("/watch/sync", headers=auth_headers)
@@ -140,18 +125,3 @@ async def test_apple_pair_success(client, auth_headers):
     data = resp.json()
     assert "pairing_token" in data
     assert len(data["pairing_token"]) > 0
-
-
-@pytest.mark.asyncio
-async def test_strava_webhook_verify_challenge(client):
-    """Strava webhook GET verification should respond with hub challenge."""
-    resp = await client.get(
-        "/watch/strava/webhook",
-        params={
-            "hub.mode": "subscribe",
-            "hub.challenge": "test_challenge",
-            "hub.verify_token": "wrong-token",
-        },
-    )
-    # Should either return the challenge or 403 for wrong token
-    assert resp.status_code in [200, 403]

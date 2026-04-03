@@ -19,6 +19,7 @@ export default function ErnaehrungPage() {
   const [uploadedMeal, setUploadedMeal] = useState<null | { meal_name: string; calories: number; protein_g: number; carbs_g: number; fat_g: number; confidence: string }>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const { data: nutritionData } = useQuery({
     queryKey: ["nutrition-today"],
@@ -63,11 +64,12 @@ export default function ErnaehrungPage() {
 
   const handleDeleteMeal = async (id: string) => {
     setDeletingId(id);
+    setDeleteError(null);
     try {
       await api.delete(`/nutrition/meal/${id}`);
       qc.invalidateQueries({ queryKey: ["nutrition-today"] });
     } catch {
-      // Fehler wird durch UI sichtbar
+      setDeleteError("Mahlzeit konnte nicht gelöscht werden. Bitte versuche es erneut.");
     } finally {
       setDeletingId(null);
       setDeleteConfirm(null);
@@ -75,10 +77,10 @@ export default function ErnaehrungPage() {
   };
 
   const macros = [
-    { label: "Kalorien", val: t.calories,   target: targets.calories,   unit: `${Math.round(t.calories)}/${targets.calories}`,          color: "bg-textMain", missing: t.calories < targets.calories * 0.8 },
-    { label: "Protein",  val: t.protein_g,  target: targets.protein_g,  unit: `${Math.round(t.protein_g)}g`,                            color: "bg-blue",     missing: t.protein_g < targets.protein_g * 0.9 },
-    { label: "Carbs",    val: t.carbs_g,    target: targets.carbs_g,    unit: `${Math.round(t.carbs_g)}/${targets.carbs_g}g`,           color: "bg-muted",    missing: t.carbs_g < targets.carbs_g * 0.7 },
-    { label: "Fett",     val: t.fat_g,      target: targets.fat_g,      unit: `${Math.round(t.fat_g)}/${targets.fat_g}g`,               color: "bg-muted",    missing: false },
+    { label: "Kalorien", val: t.calories,   target: targets.calories,   unit: `${Math.round(t.calories)} / ${targets.calories} kcal`,  dotColor: "bg-textMain", missing: t.calories < targets.calories * 0.8 },
+    { label: "Protein",  val: t.protein_g,  target: targets.protein_g,  unit: `${Math.round(t.protein_g)}g`,                           dotColor: "bg-blue",     missing: t.protein_g < targets.protein_g * 0.9 },
+    { label: "Carbs",    val: t.carbs_g,    target: targets.carbs_g,    unit: `${Math.round(t.carbs_g)} / ${targets.carbs_g}g`,        dotColor: "bg-[#888]",   missing: t.carbs_g < targets.carbs_g * 0.7 },
+    { label: "Fett",     val: t.fat_g,      target: targets.fat_g,      unit: `${Math.round(t.fat_g)} / ${targets.fat_g}g`,            dotColor: "bg-[#888]",   missing: false },
   ];
 
 
@@ -146,12 +148,11 @@ export default function ErnaehrungPage() {
           {missingMacros.length > 0 && <p className="text-xs font-sans text-blue">● {missingMacros.join(", ")} fehlen</p>}
         </div>
         {macros.map((m, i) => (
-          <div key={i} className="flex items-center gap-3 mb-3">
-            <span className={`text-xs font-sans w-16 tracking-wider uppercase ${m.missing ? "text-blue" : "text-textDim"}`}>
-              {m.missing ? "●" : " "} {m.label}
-            </span>
-            <div className="bar-track flex-1"><div className={`bar-fill ${m.color}`} style={{ width: `${m.target > 0 ? Math.min(100, (m.val / m.target) * 100) : 0}%` }} /></div>
-            <span className="font-pixel text-textDim whitespace-nowrap" style={{ fontSize: 13 }}>{m.unit}</span>
+          <div key={i} className="flex items-center gap-2 mb-2.5">
+            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${m.missing ? "bg-blue" : m.dotColor}`} />
+            <span className={`text-xs font-sans w-14 tracking-wider uppercase shrink-0 ${m.missing ? "text-blue" : "text-textDim"}`}>{m.label}</span>
+            <div className="bar-track flex-1"><div className={`bar-fill ${m.missing ? "bg-blue" : m.dotColor}`} style={{ width: `${m.target > 0 ? Math.min(100, (m.val / m.target) * 100) : 0}%` }} /></div>
+            <span className="font-sans text-textDim whitespace-nowrap" style={{ fontSize: 11 }}>{m.unit}</span>
           </div>
         ))}
         {targets.rationale && !targetsLoading && (
@@ -217,6 +218,9 @@ export default function ErnaehrungPage() {
               </div>
             </div>
           ))
+        )}
+        {deleteError && (
+          <p className="text-xs font-sans text-danger px-5 py-2" role="alert">{deleteError}</p>
         )}
       </div>
 

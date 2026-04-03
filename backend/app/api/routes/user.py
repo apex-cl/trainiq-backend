@@ -38,6 +38,13 @@ class ProfileUpdateRequest(BaseModel):
             raise ValueError("Sprache muss eine der folgenden sein: de, en, fr, es, it")
         return v
 
+    @field_validator("gender")
+    @classmethod
+    def validate_gender(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in {"male", "female", "other", ""}:
+            raise ValueError("Geschlecht muss 'male', 'female', 'other' oder leer sein")
+        return v or None
+
     @field_validator("avatar_url")
     @classmethod
     def validate_avatar_url(cls, v: Optional[str]) -> Optional[str]:

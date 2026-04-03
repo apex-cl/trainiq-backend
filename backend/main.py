@@ -4,8 +4,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.responses import ORJSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -14,6 +12,7 @@ from app.core.logging import setup_logging
 from app.api.routes import (
     auth,
     auth_keycloak,
+    analytics,
     coach,
     training,
     metrics,
@@ -134,31 +133,41 @@ async def _ensure_demo_user():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Demo-User sicherstellen (nur im Dev-Modus sinnvoll)
+    # Runs as a background task so it never blocks application startup
+    if settings.dev_mode:
+        import asyncio as _asyncio
+
+        async def _bg_demo():
+            try:
+                await _ensure_demo_user()
+            except Exception as e:
+                log.warning(f"Demo-User konnte nicht erstellt werden: {e}")
+
+        _asyncio.create_task(_bg_demo())
+
+    # Scheduler runs as a dedicated container in production (docker-compose.backend.yml).
+    # Only start it in the API process during local dev (single-process uvicorn).
+    _scheduler_started = False
     if settings.dev_mode:
         try:
-            await _ensure_demo_user()
+            start_scheduler()
+            _scheduler_started = True
+            log.info("Scheduler started (dev mode)")
         except Exception as e:
-            log.warning(f"Demo-User konnte nicht erstellt werden: {e}")
-
-    try:
-        start_scheduler()
-        log.info("Scheduler started")
-    except Exception as e:
-        log.error(f"Scheduler failed to start | error={e}")
+            log.error(f"Scheduler failed to start | error={e}")
 
     yield
 
-    from app.scheduler.runner import scheduler
-
-    if scheduler.running:
-        scheduler.shutdown(wait=False)
+    if _scheduler_started:
+        from app.scheduler.runner import scheduler
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
     title="TrainIQ API",
     version="1.0.0",
     lifespan=lifespan,
-    default_response_class=ORJSONResponse,  # ~2-3× faster JSON serialization
 )
 
 app.state.limiter = limiter
@@ -172,10 +181,18 @@ if settings.dev_mode:
         "http://localhost:8000",
     ]
 else:
-    # Production: only the explicitly configured frontend URL is allowed
+    # Production: frontend URL + any additional origins (e.g. www subdomain)
     _origins = [settings.frontend_url] if settings.frontend_url else []
+
 if settings.frontend_url and settings.frontend_url not in _origins:
     _origins.append(settings.frontend_url)
+
+# Additional CORS origins from env (comma-separated)
+if settings.additional_cors_origins:
+    for _origin in settings.additional_cors_origins.split(","):
+        _origin = _origin.strip()
+        if _origin and _origin not in _origins:
+            _origins.append(_origin)
 
 app.add_middleware(
     CORSMiddleware,
@@ -186,28 +203,25 @@ app.add_middleware(
 )
 
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "SAMEORIGIN"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Permissions-Policy"] = (
-            "camera=(), microphone=(), geolocation=(), payment=()"
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=()"
+    )
+    if not settings.dev_mode:
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
         )
-        if not settings.dev_mode:
-            response.headers["Strict-Transport-Security"] = (
-                "max-age=31536000; includeSubDomains"
-            )
-        # Correlation ID für Tracing / Logs
-        req_id = request.headers.get("X-Request-ID", "")
-        if req_id:
-            response.headers["X-Request-ID"] = req_id
-        return response
-
-
-app.add_middleware(SecurityHeadersMiddleware)
+    # Correlation ID für Tracing / Logs
+    req_id = request.headers.get("X-Request-ID", "")
+    if req_id:
+        response.headers["X-Request-ID"] = req_id
+    return response
 
 
 @app.middleware("http")
@@ -246,6 +260,7 @@ app.include_router(
 )
 app.include_router(billing.router, prefix="/billing", tags=["billing"])
 app.include_router(guest.router, prefix="/guest", tags=["guest"])
+app.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 
 
 @app.get("/health")
@@ -253,7 +268,6 @@ async def health():
     db_ok = False
     redis_ok = False
     llm_ok = None
-    strava_ok = None
 
     try:
         async with async_session() as db:
@@ -263,16 +277,11 @@ async def health():
         pass
 
     try:
-        import redis.asyncio as aioredis
+        from app.core.redis import get_redis
 
-        r = aioredis.from_url(settings.redis_url)
-        try:
-            result = await r.ping()
-            if result is True:
-                redis_ok = True
-        except Exception:
-            pass
-        await r.aclose()
+        result = await get_redis().ping()
+        if result is True:
+            redis_ok = True
     except Exception:
         log.warning("Health check: Redis nicht erreichbar")
 
@@ -290,15 +299,11 @@ async def health():
             llm_ok = "error"
             log.warning(f"Health check: LLM API nicht erreichbar | error={e}")
 
-    if settings.strava_client_id:
-        strava_ok = "configured"  # Key is set — actual connectivity not checked here
-
     all_ok = db_ok and redis_ok
     return {
         "status": "ok" if all_ok else "degraded",
         "db": "ok" if db_ok else "error",
         "redis": "ok" if redis_ok else "error",
         "llm": llm_ok,
-        "strava": strava_ok,
         "version": "1.0.0",
     }

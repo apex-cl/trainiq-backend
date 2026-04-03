@@ -14,12 +14,9 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-not-for-production"
     jwt_expire_minutes: int = 10080
 
-    # Strava API
-    strava_client_id: str = ""
-    strava_client_secret: str = ""
-    strava_redirect_uri: str = "http://localhost/api/watch/strava/callback"
-    strava_webhook_verify_token: str = "trainiq_webhook"
     frontend_url: str = "http://localhost"
+    # Komma-getrennte Liste weiterer CORS-Origins (z.B. https://www.trainiq.com)
+    additional_cors_origins: str = ""
 
     # SMTP E-Mail
     smtp_host: str = "localhost"
@@ -35,7 +32,7 @@ class Settings(BaseSettings):
     demo_user_id: str = "00000000-0000-0000-0000-000000000001"
 
     # Gast-Session Limits
-    guest_max_messages: int = 10
+    guest_max_messages: int = 5
     guest_max_photos: int = 2
     guest_session_hours: int = 24
 
@@ -86,59 +83,17 @@ class Settings(BaseSettings):
     garmin_client_id: str = ""
     garmin_client_secret: str = ""
 
-    # Polar AccessLink API (https://www.polar.com/accesslink-api/)
-    polar_client_id: str = ""
-    polar_client_secret: str = ""
-    polar_redirect_uri: str = "http://localhost/api/watch/polar/callback"
-
-    # Wahoo Fitness API (https://developer.wahoofitness.com/)
-    wahoo_client_id: str = ""
-    wahoo_client_secret: str = ""
-    wahoo_redirect_uri: str = "http://localhost/api/watch/wahoo/callback"
-
-    # Fitbit Web API (https://dev.fitbit.com/)
-    fitbit_client_id: str = ""
-    fitbit_client_secret: str = ""
-    fitbit_redirect_uri: str = "http://localhost/api/watch/fitbit/callback"
-
-    # Suunto App API (https://apizone.suunto.com/)
-    suunto_client_id: str = ""
-    suunto_client_secret: str = ""
-    suunto_redirect_uri: str = "http://localhost/api/watch/suunto/callback"
-
-    # Withings Health API (https://developer.withings.com/)
-    withings_client_id: str = ""
-    withings_client_secret: str = ""
-    withings_redirect_uri: str = "http://localhost/api/watch/withings/callback"
-
-    # COROS Open Platform (https://open.coros.com/)
-    coros_client_id: str = ""
-    coros_client_secret: str = ""
-    coros_redirect_uri: str = "http://localhost/api/watch/coros/callback"
-
-    # Zepp Health / Amazfit (https://open-platform.zepp.com/)
-    zepp_client_id: str = ""
-    zepp_client_secret: str = ""
-    zepp_redirect_uri: str = "http://localhost/api/watch/zepp/callback"
-
-    # WHOOP Developer API (https://developer.whoop.com/)
-    whoop_client_id: str = ""
-    whoop_client_secret: str = ""
-    whoop_redirect_uri: str = "http://localhost/api/watch/whoop/callback"
-
-    # Samsung Health Platform API (https://developer.samsung.com/health/)
-    samsung_health_client_id: str = ""
-    samsung_health_client_secret: str = ""
-    samsung_health_redirect_uri: str = "http://localhost/api/watch/samsung/callback"
-
-    # Google Fit / Health Connect (https://developers.google.com/fit/)
-    # Deckt ab: Nothing Watch Pro, CMF Watch Pro, OnePlus Watch, alle Wear OS Uhren
-    google_fit_client_id: str = ""
-    google_fit_client_secret: str = ""
-    google_fit_redirect_uri: str = "http://localhost/api/watch/googlefit/callback"
+    # Strava API — universeller Hub für alle Uhren (einmalige Registrierung)
+    # Registrierung: https://www.strava.com/settings/api
+    # Deckt ab: Polar, Wahoo, Suunto, COROS, Zepp/Amazfit, Fitbit,
+    #           Samsung Health, WHOOP, Google Fit (Wear OS), Apple Watch
+    strava_client_id: str = ""
+    strava_client_secret: str = ""
+    strava_redirect_uri: str = "http://localhost/api/watch/strava/callback"
 
     # Keycloak OIDC Configuration
     keycloak_url: str = "http://localhost:8080"
+    keycloak_internal_url: str = ""  # Docker-intern (z.B. http://keycloak:8080), leer = keycloak_url
     keycloak_realm: str = "trainiq"
     keycloak_client_id: str = "trainiq-frontend"
     keycloak_client_secret: str = ""
@@ -161,11 +116,6 @@ if not settings.dev_mode:
         raise ValueError(
             f"SICHERHEITSRISIKO: JWT_SECRET ist zu kurz ({len(settings.jwt_secret)} Zeichen). "
             "Mindestens 32 Zeichen erforderlich."
-        )
-    if settings.strava_client_id and settings.strava_webhook_verify_token == "trainiq_webhook":
-        raise ValueError(
-            "SICHERHEITSRISIKO: STRAVA_WEBHOOK_VERIFY_TOKEN ist noch der Default-Wert. "
-            "Setze STRAVA_WEBHOOK_VERIFY_TOKEN in deiner .env auf einen zufälligen String."
         )
     if settings.keycloak_admin_password in ("", "admin"):
         import warnings

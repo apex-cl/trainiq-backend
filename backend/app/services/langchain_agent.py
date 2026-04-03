@@ -25,26 +25,28 @@ from app.services.coach_prompts import (
 )
 
 
+STATUS_MAP = {
+    "get_user_metrics": "📊 *Lade deine Gesundheitsmetriken...*\n\n",
+    "get_training_plan": "🏃 *Lade deinen Trainingsplan...*\n\n",
+    "set_rest_day": "😴 *Setze Ruhetag...*\n\n",
+    "update_training_day": "✏️ *Passe Training an...*\n\n",
+    "generate_new_week_plan": "📅 *Erstelle neuen Wochenplan...*\n\n",
+    "get_nutrition_summary": "🥗 *Lade Ernährungsdaten...*\n\n",
+    "create_weekly_meal_plan": "🍳 *Erstelle Wochenspeiseplan mit Rezepten...*\n\n",
+    "get_user_goals": "🎯 *Lade deine Ziele...*\n\n",
+    "get_daily_wellbeing": "💭 *Lade heutiges Befinden...*\n\n",
+    "analyze_nutrition_gaps": "🔍 *Analysiere Nährstofflücken...*\n\n",
+    "get_vo2max_history": "📈 *Lade VO2max-Verlauf...*\n\n",
+    "get_injury_history": "🩹 *Prüfe Verletzungshistorie...*\n\n",
+    "get_sleep_trend": "🌙 *Analysiere Schlaftrend...*\n\n",
+    "log_symptom": "📝 *Speichere Symptom...*\n\n",
+    "calculate_training_zones": "⚙️ *Berechne Herzfrequenzzonen...*\n\n",
+    "get_race_history": "🏅 *Lade Wettkampfhistorie...*\n\n",
+}
+
+
 def _tool_status_message(tool_name: str) -> str:
     """Gibt eine lesbare Status-Nachricht für Tool-Aufrufe zurück."""
-    STATUS_MAP = {
-        "get_user_metrics": "📊 *Lade deine Gesundheitsmetriken...*\n\n",
-        "get_training_plan": "🏃 *Lade deinen Trainingsplan...*\n\n",
-        "set_rest_day": "😴 *Setze Ruhetag...*\n\n",
-        "update_training_day": "✏️ *Passe Training an...*\n\n",
-        "generate_new_week_plan": "📅 *Erstelle neuen Wochenplan...*\n\n",
-        "get_nutrition_summary": "🥗 *Lade Ernährungsdaten...*\n\n",
-        "create_weekly_meal_plan": "🍳 *Erstelle Wochenspeiseplan mit Rezepten...*\n\n",
-        "get_user_goals": "🎯 *Lade deine Ziele...*\n\n",
-        "get_daily_wellbeing": "💭 *Lade heutiges Befinden...*\n\n",
-        "analyze_nutrition_gaps": "🔍 *Analysiere Nährstofflücken...*\n\n",
-        "get_vo2max_history": "📈 *Lade VO2max-Verlauf...*\n\n",
-        "get_injury_history": "🩹 *Prüfe Verletzungshistorie...*\n\n",
-        "get_sleep_trend": "🌙 *Analysiere Schlaftrend...*\n\n",
-        "log_symptom": "📝 *Speichere Symptom...*\n\n",
-        "calculate_training_zones": "⚙️ *Berechne Herzfrequenzzonen...*\n\n",
-        "get_race_history": "🏅 *Lade Wettkampfhistorie...*\n\n",
-    }
     return STATUS_MAP.get(tool_name, "")
 
 
@@ -57,6 +59,18 @@ def _create_llm(streaming: bool = True) -> ChatOpenAI:
         streaming=streaming,
         temperature=0.7,
         max_tokens=2048,
+    )
+
+
+def _create_tool_llm() -> ChatOpenAI:
+    """Schnelle LLM-Instanz nur für Tool-Entscheidungen (weniger Tokens als finale Antwort)."""
+    return ChatOpenAI(
+        model=settings.llm_model,
+        api_key=settings.active_llm_api_key,
+        base_url=settings.llm_base_url,
+        streaming=False,
+        temperature=0.2,
+        max_tokens=1024,
     )
 
 
@@ -167,8 +181,8 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
             plan.workout_type = "rest"
             plan.duration_min = 0
             plan.intensity_zone = 1
-            plan.target_hr_min = 0
-            plan.target_hr_max = 0
+            plan.target_hr_min = None
+            plan.target_hr_max = None
             plan.description = f"Ruhetag — {grund[:200]}"
             plan.coach_reasoning = grund[:500]
             await db.flush()
@@ -400,13 +414,10 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
         """Lädt bekannte Verletzungen und Beschwerden aus dem Gedächtnis. Aufrufen bei Verletzungsfragen oder um Training anzupassen."""
         from app.services.ai_memory import AIMemoryService
         mem = AIMemoryService()
-        memories = await mem.get_relevant_memories("Verletzung Schmerzen Beschwerden Knie Rücken", user_id, db)
-        if not memories:
+        result_text = await mem.retrieve_relevant("Verletzung Schmerzen Beschwerden Knie Rücken", user_id, db)
+        if not result_text:
             return "Keine Verletzungshistorie im Gedächtnis gefunden."
-        return json.dumps([
-            {"fakt": m.content, "kategorie": m.category, "datum": m.created_at.date().isoformat()}
-            for m in memories
-        ], ensure_ascii=False)
+        return result_text
 
     @tool
     async def get_sleep_trend() -> str:
@@ -501,13 +512,10 @@ def _create_tools(user_id: str, db: AsyncSession) -> list:
         """Lädt vergangene Wettkampfergebnisse und persönliche Bestzeiten aus dem Gedächtnis."""
         from app.services.ai_memory import AIMemoryService
         mem = AIMemoryService()
-        memories = await mem.get_relevant_memories("Wettkampf Rennen Marathon Halbmarathon Bestzeit Ergebnis km/h", user_id, db)
-        if not memories:
+        result_text = await mem.retrieve_relevant("Wettkampf Rennen Marathon Halbmarathon Bestzeit Ergebnis km/h", user_id, db)
+        if not result_text:
             return "Keine Wettkampfhistorie im Gedächtnis gefunden."
-        return json.dumps([
-            {"fakt": m.content, "kategorie": m.category, "datum": m.created_at.date().isoformat()}
-            for m in memories
-        ], ensure_ascii=False)
+        return result_text
 
     return [
         get_user_metrics,
@@ -585,22 +593,30 @@ class LangChainCoachAgent:
         # Tools vorbereiten
         tools_list = _create_tools(user_id, db)
         tools_by_name = {t.name: t for t in tools_list}
-        llm_with_tools = self._build_llm(streaming=False).bind_tools(tools_list)
+        llm_with_tools = _create_tool_llm().bind_tools(tools_list)
         llm_streaming = self._build_llm(streaming=True)
 
         full_response = ""
+        thinking_sent = False
 
         try:
             # Agent-Loop: max 6 Tool-Runden
             for _round in range(6):
+                # Sofortiges Feedback vor jedem LLM-Call (kein leerer Wartebildschirm)
+                if not thinking_sent:
+                    thinking_msg = "⌛ *Analysiere deine Anfrage...*\n\n"
+                    full_response += thinking_msg
+                    yield f"data: {thinking_msg}\n\n"
+                    thinking_sent = True
+
                 ai_msg = await llm_with_tools.ainvoke(lc_messages)
                 tool_calls_list = ai_msg.tool_calls if hasattr(ai_msg, "tool_calls") else []
 
                 if not tool_calls_list:
-                    # Keine Tools mehr → finale Antwort streamen
+                    # Finale Antwort — erst versuchen ob content schon vorhanden
                     final_text = (ai_msg.content or "").strip()
                     if not final_text:
-                        # Leer → explizit nach Antwort fragen
+                        # Leer → explizit nach Antwort fragen (echtes Streaming)
                         lc_messages.append(ai_msg)
                         lc_messages.append(HumanMessage(content="Bitte gib jetzt deine Antwort auf Deutsch."))
                         async for chunk in llm_streaming.astream(lc_messages):
@@ -610,11 +626,10 @@ class LangChainCoachAgent:
                                 safe = text.replace("\n", "\ndata: ")
                                 yield f"data: {safe}\n\n"
                     else:
-                        # Direkt streamen (chunk-weise simulieren)
-                        for chunk_text in _split_into_chunks(final_text, size=40):
-                            full_response += chunk_text
-                            safe = chunk_text.replace("\n", "\ndata: ")
-                            yield f"data: {safe}\n\n"
+                        # Model hat bereits geantwortet — sende Text direkt
+                        full_response += final_text
+                        safe = final_text.replace("\n", "\ndata: ")
+                        yield f"data: {safe}\n\n"
                     break
 
                 # Tool-Calls ausführen
@@ -625,27 +640,38 @@ class LangChainCoachAgent:
                     status_msg = _tool_status_message(tool_name)
                     if status_msg:
                         full_response += status_msg
-                        yield f"data: {status_msg}\n\n"
+                        safe_status = status_msg.replace("\n", "\ndata: ")
+                        yield f"data: {safe_status}\n\n"
                     tool_result = await self._run_tool(tool_name, tool_args, tools_by_name)
                     lc_messages.append(ToolMessage(
                         content=tool_result,
                         tool_call_id=tc["id"],
                     ))
+            else:
+                # Alle 6 Runden verbraucht ohne finale Antwort → erzwinge Antwort
+                logger.warning(f"Agent loop exhausted without final answer | user={user_id}")
+                lc_messages.append(HumanMessage(content="Bitte gib jetzt deine abschließende Antwort auf Deutsch."))
+                async for chunk in llm_streaming.astream(lc_messages):
+                    text = chunk.content or ""
+                    if text:
+                        full_response += text
+                        safe = text.replace("\n", "\ndata: ")
+                        yield f"data: {safe}\n\n"
 
         except Exception as e:
             logger.error(f"LangChain stream failed | user={user_id} | error={e}")
-            from app.services.coach_agent import CoachAgent
-            fallback = CoachAgent()
-            async for chunk in fallback.stream(message, user_id, db):
-                yield chunk
-            return
+            error_msg = "Entschuldigung, ich konnte deine Anfrage gerade nicht verarbeiten. Bitte versuche es erneut."
+            full_response += error_msg
+            yield f"data: {error_msg}\n\n"
 
-        # Antwort + Memory speichern
+        # Antwort + Memory speichern (ohne Status-Nachrichten)
         if full_response:
             clean_response = full_response
-            for status in _tool_status_message.__defaults__ or []:
-                clean_response = clean_response.replace(status, "")
-            db.add(Conversation(user_id=user_id, role="assistant", content=full_response))
+            for status_val in STATUS_MAP.values():
+                clean_response = clean_response.replace(status_val, "")
+            clean_response = clean_response.replace("⌛ *Analysiere deine Anfrage...*\n\n", "").strip()
+            save_content = clean_response if clean_response else full_response
+            db.add(Conversation(user_id=user_id, role="assistant", content=save_content))
             await db.flush()
             await self.memory_service.extract_and_store(
                 message, user_id, db, conversation_id=str(user_conv.id)

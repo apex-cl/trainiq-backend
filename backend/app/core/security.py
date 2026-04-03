@@ -29,6 +29,8 @@ def create_access_token(data: dict) -> str:
 def verify_token(token: str) -> dict:
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        if not payload.get("sub"):
+            raise JWTError("Missing sub claim")
         return payload
     except JWTError:
         raise HTTPException(

@@ -1,6 +1,7 @@
 import uuid
 import re
 import secrets
+import bcrypt as _bcrypt
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, field_validator
@@ -19,6 +20,10 @@ router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+
+# Pre-computed valid bcrypt hash for constant-time dummy check (prevents user-enumeration
+# via timing side-channel when the user is not found).
+_DUMMY_HASH: str = _bcrypt.hashpw(b"__timing_guard__", _bcrypt.gensalt(rounds=12)).decode()
 
 
 # ─── Request Models ──────────────────────────────────────────────────────────
@@ -51,7 +56,9 @@ class RegisterRequest(BaseModel):
     def validate_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Passwort muss mindestens 8 Zeichen lang sein")
-        if not any(c.isdigit() or not c.isalpha() for c in v):
+        has_digit = any(c.isdigit() for c in v)
+        has_special = any(not c.isalnum() for c in v)
+        if not has_digit and not has_special:
             raise ValueError("Passwort muss mindestens eine Zahl oder ein Sonderzeichen enthalten")
         return v
 
@@ -70,7 +77,9 @@ class ChangePasswordRequest(BaseModel):
     def validate_new_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Neues Passwort muss mindestens 8 Zeichen lang sein")
-        if not any(c.isdigit() or not c.isalpha() for c in v):
+        has_digit = any(c.isdigit() for c in v)
+        has_special = any(not c.isalnum() for c in v)
+        if not has_digit and not has_special:
             raise ValueError("Passwort muss mindestens eine Zahl oder ein Sonderzeichen enthalten")
         return v
 
@@ -88,7 +97,9 @@ class ResetPasswordRequest(BaseModel):
     def validate_new_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Passwort muss mindestens 8 Zeichen lang sein")
-        if not any(c.isdigit() or not c.isalpha() for c in v):
+        has_digit = any(c.isdigit() for c in v)
+        has_special = any(not c.isalnum() for c in v)
+        if not has_digit and not has_special:
             raise ValueError("Passwort muss mindestens eine Zahl oder ein Sonderzeichen enthalten")
         return v
 
@@ -148,8 +159,8 @@ async def login(
     result = await db.execute(select(User).where(User.email == request_data.email))
     user = result.scalar_one_or_none()
     if not user:
-        # Dummy-check damit Timing-Angriffe zur User-Enumeration nicht möglich sind
-        verify_password("dummy", "$2b$12$dummy.hash.that.never.matches.anything.xx")
+        # Constant-time dummy check prevents user-enumeration via timing side-channel.
+        verify_password(request_data.password, _DUMMY_HASH)
         raise HTTPException(status_code=401, detail="Ungültige Anmeldedaten")
     if not user.password_hash:
         raise HTTPException(status_code=401, detail="Bitte melde dich über Keycloak an")

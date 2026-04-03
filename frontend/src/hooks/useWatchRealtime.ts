@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useAuthStore } from "@/store/auth";
 
 export interface WatchSyncEvent {
   event: string;
@@ -12,14 +13,14 @@ export interface WatchSyncEvent {
 
 /**
  * Öffnet eine persistente SSE-Verbindung zum Backend.
- * Sobald Strava/Garmin eine Aktivität synchronisiert, werden
+  * Sobald Garmin, Polar o.ä. eine Aktivität synchronisiert, werden
  * Metriken und Trainingsplan automatisch neu geladen.
  *
- * Nutzt den bestehenden JWT-Token aus localStorage.
  * Reconnect mit exponential backoff bei Verbindungsabbruch.
  */
 export function useWatchRealtime() {
   const qc = useQueryClient();
+  const token = useAuthStore((s) => s.token);
   const esRef = useRef<EventSource | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryDelayRef = useRef(2000);
@@ -27,7 +28,6 @@ export function useWatchRealtime() {
 
   const connect = useCallback(() => {
     if (typeof window === "undefined") return;
-    const token = localStorage.getItem("token");
     if (!token) return;
 
     // Bereits verbunden
@@ -47,7 +47,6 @@ export function useWatchRealtime() {
         const data: WatchSyncEvent = JSON.parse(e.data);
         if (data.event === "activity_synced") {
           setLastEvent(data);
-          // Alle relevanten Caches invalidieren → automatisches Neu-Laden
           qc.invalidateQueries({ queryKey: ["training-week"] });
           qc.invalidateQueries({ queryKey: ["metrics-today"] });
           qc.invalidateQueries({ queryKey: ["metrics-recovery"] });
@@ -63,12 +62,11 @@ export function useWatchRealtime() {
     es.onerror = () => {
       es.close();
       esRef.current = null;
-      // Exponential backoff: 2s → 4s → 8s → max 30s
       const delay = Math.min(retryDelayRef.current, 30000);
-      retryDelayRef.current = delay * 2;
+      retryDelayRef.current = Math.min(delay * 2, 30000);
       retryRef.current = setTimeout(connect, delay);
     };
-  }, [qc]);
+  }, [qc, token]);
 
   useEffect(() => {
     connect();
@@ -83,3 +81,4 @@ export function useWatchRealtime() {
 
   return { lastEvent };
 }
+

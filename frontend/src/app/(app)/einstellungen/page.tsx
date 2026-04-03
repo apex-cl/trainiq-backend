@@ -1,91 +1,48 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { LogOut, Unlink, Check, Trophy, Flame, Zap, Dumbbell, Heart, Sunrise, Timer, CheckCircle2, type LucideProps } from "lucide-react";
-import type React from "react";
-
-const ACHIEVEMENT_ICONS: Record<string, React.ComponentType<LucideProps>> = {
-  Trophy, Flame, Zap, Dumbbell, Heart, Sunrise, Timer, CheckCircle2,
-};
+import { LogOut, Unlink, Check } from "lucide-react";
 import api from "@/lib/api";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/store/auth";
-import { useAchievements } from "@/hooks/useGamification";
 import { useBilling } from "@/hooks/useBilling";
 import { PushNotificationSettings } from "@/components/PushNotificationSettings";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { useI18n } from "@/hooks/useI18n";
 
 // Verbindungs-Typ:
-//   "oauth"       → normaler OAuth-Redirect (Strava)
-//   "credentials" → E-Mail + Passwort (Garmin)
-//   "file_upload" → GPX/TCX-Datei hochladen (Polar, Apple Health)
+//   "credentials"  → E-Mail + Passwort (Garmin)
+//   "oauth"        → Direkt OAuth-Redirect zum Anbieter
+//   "apple_pair"   → iOS HealthKit Koppelcode
+//
+// Verfügbare Anbieter (kein API-Key nötig):
+//   Garmin   → garminconnect-Library (E-Mail + Passwort)
+//   Strava   → kostenloser OAuth-Hub — deckt ab:
+//              Polar, Wahoo, Suunto, COROS, Zepp/Amazfit, Fitbit,
+//              Samsung Health, WHOOP, Google Fit (Wear OS), Apple Watch
+//   Apple    → iOS HealthKit Koppelcode (kein API-Key)
 const PROVIDERS = [
-  { id: "strava",  name: "Strava",       type: "oauth" as const,       connectPath: "/watch/strava/connect",  disconnectPath: "/watch/strava/disconnect",  hint: "Gratis Entwickler-Keys unter strava.com/settings/api" },
-  { id: "garmin",  name: "Garmin",       type: "credentials" as const, connectPath: "/watch/garmin/login",    disconnectPath: "/watch/garmin/disconnect",  hint: "Deine Garmin-Connect E-Mail + Passwort" },
-  { id: "polar",   name: "Polar",        type: "file_upload" as const, connectPath: null,                     disconnectPath: "/watch/polar/disconnect",   hint: "GPX aus sport.polar.com exportieren" },
-  { id: "apple",   name: "Apple Health", type: "file_upload" as const, connectPath: null,                     disconnectPath: "/watch/apple/disconnect",   hint: "GPX-Datei aus Health App exportieren" },
+  { id: "garmin",      name: "Garmin Connect", type: "credentials" as const, connectPath: "/watch/garmin/login",       disconnectPath: "/watch/garmin/disconnect",  hint: "Garmin-Connect E-Mail + Passwort" },
+  { id: "strava",      name: "Strava",         type: "oauth" as const,       connectPath: "/watch/strava/connect",     disconnectPath: "/watch/strava/disconnect",  hint: "Strava verbinden — synchronisiert automatisch mit Polar, Wahoo, Suunto, COROS, Zepp/Amazfit, Fitbit, Samsung Health, WHOOP und allen Wear-OS-Uhren" },
+  { id: "apple_watch", name: "Apple Watch",    type: "apple_pair" as const,  connectPath: "/watch/apple/pair",         disconnectPath: "/watch/apple/disconnect",   hint: "iOS HealthKit – Koppelcode generieren" },
 ];
 
 const FITNESS_LEVELS = ["beginner", "intermediate", "advanced"] as const;
 const SPORTS = ["running", "cycling", "swimming", "triathlon"] as const;
 
-function AchievementsSection() {
-  const { achievements, isLoading } = useAchievements();
-  const { t } = useI18n();
-
-  return (
-    <div className="px-5 py-5 border-b border-border">
-      <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-4">{t("settings.achievements")}</p>
-      {isLoading ? (
-        <div className="grid grid-cols-4 gap-3">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className="flex flex-col items-center gap-1">
-              <div className="w-12 h-12 bg-[#EBEBEB] animate-pulse" />
-              <div className="h-2 w-10 bg-[#EBEBEB] animate-pulse" />
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="grid grid-cols-4 gap-3">
-          {achievements.map((a) => {
-            const unlocked = a.unlocked_at !== null;
-            return (
-              <div
-                key={a.id}
-                title={a.description}
-                className={`flex flex-col items-center gap-1 py-2 border border-border transition-colors ${unlocked ? "border-blue" : "opacity-30"}`}
-              >
-                {(() => { const Icon = ACHIEVEMENT_ICONS[a.icon] ?? Trophy; return <Icon size={22} strokeWidth={1.5} className={unlocked ? "text-blue" : ""} />; })()}
-                <span className="text-[10px] font-sans text-textDim tracking-wider uppercase text-center leading-tight">
-                  {a.title}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {achievements.some((a) => a.unlocked_at) && (
-        <p className="text-xs font-sans text-blue mt-3">
-          {t("settings.unlockedCount", {
-            count: String(achievements.filter((a) => a.unlocked_at).length),
-            total: String(achievements.length),
-          })}
-        </p>
-      )}
-    </div>
-  );
-}
-
 export default function EinstellungenPage() {
   const router = useRouter();
-  const { user, logout } = useAuthStore();
+  const queryClient = useQueryClient();
+  const user = useAuthStore((s) => s.user);
+  const token = useAuthStore((s) => s.token);
+  const logout = useAuthStore((s) => s.logout);
+  const isGuest = !token;
   const { t } = useI18n();
-  const { subscription, fetchSubscription, createCheckout, openPortal, loading: billingLoading } = useBilling();
+  const { fetchSubscription } = useBilling();
 
   useEffect(() => {
-    fetchSubscription();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!isGuest) fetchSubscription();
+  }, [fetchSubscription, isGuest]);
 
   // Profil-State
   const [profileLoading, setProfileLoading] = useState(true);
@@ -96,9 +53,11 @@ export default function EinstellungenPage() {
   const [heightCm, setHeightCm] = useState<number | null>(null);
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
+  const [profileError, setProfileError] = useState("");
+  const [deleteError, setDeleteError] = useState("");
 
   // Ziele-State
-  const [sport, setSport] = useState("running");
+  const [sports, setSports] = useState<Set<string>>(new Set(["running"]));
   const [goalDescription, setGoalDescription] = useState("");
   const [weeklyHours, setWeeklyHours] = useState(5);
   const [fitnessLevel, setFitnessLevel] = useState("intermediate");
@@ -108,23 +67,27 @@ export default function EinstellungenPage() {
 
   // Watch-State
   const [connectedProviders, setConnectedProviders] = useState<Set<string>>(new Set());
-  const [stravaAvailable, setStravaAvailable] = useState(false);
+  const [availableProviders, setAvailableProviders] = useState<Set<string>>(new Set<string>(PROVIDERS.map((p) => p.id)));
+  const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
   const [watchLoading, setWatchLoading] = useState(true);
   const [connectingProvider, setConnectingProvider] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
   const [disconnectingProvider, setDisconnectingProvider] = useState<string | null>(null);
-  const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
-  const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
   // Garmin credential form
   const [garminEmail, setGarminEmail] = useState("");
   const [garminPassword, setGarminPassword] = useState("");
   const [garminLoading, setGarminLoading] = useState(false);
-  // File upload form
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadLoading, setUploadLoading] = useState(false);
-  const [uploadMsg, setUploadMsg] = useState("");
-  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [goalError, setGoalError] = useState(false);
+  // Apple Watch pairing
+  const [applePairToken, setApplePairToken] = useState<string | null>(null);
+  const [applePairLoading, setApplePairLoading] = useState(false);
+  // Datei-Import (.fit / .tcx / .gpx / .csv)
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importResult, setImportResult] = useState<{ imported: number; message: string } | null>(null);
+  const [importError, setImportError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Connected banner (after OAuth redirect or Garmin login)
+  const [connectedBanner, setConnectedBanner] = useState<string | null>(null);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -132,12 +95,34 @@ export default function EinstellungenPage() {
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState("");
   const [passwordSaved, setPasswordSaved] = useState(false);
+  const [goalError, setGoalError] = useState(false);
+  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // Timer refs for cleanup on unmount
+  const profileSavedTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const goalSavedTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const passwordSavedTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const connectedBannerTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => {
+    return () => {
+      clearTimeout(profileSavedTimerRef.current);
+      clearTimeout(goalSavedTimerRef.current);
+      clearTimeout(passwordSavedTimerRef.current);
+      clearTimeout(connectedBannerTimerRef.current);
+    };
+  }, []);
 
   // Profil + Ziele laden
   useEffect(() => {
+    if (isGuest) {
+      setProfileLoading(false);
+      return;
+    }
+    const controller = new AbortController();
     const load = async () => {
       try {
-        const { data } = await api.get("/user/profile");
+        const { data } = await api.get("/user/profile", { signal: controller.signal });
         setName(data.name || "");
         setBirthDate(data.birth_date || "");
         setGender(data.gender || "");
@@ -145,102 +130,124 @@ export default function EinstellungenPage() {
         setHeightCm(data.height_cm);
         if (data.goals && data.goals.length > 0) {
           const g = data.goals[0];
-          setSport(g.sport || "running");
+          setSports(new Set((g.sport || "running").split(",").map((s: string) => s.trim()).filter(Boolean)));
           setGoalDescription(g.goal_description || "");
           setWeeklyHours(g.weekly_hours || 5);
           setFitnessLevel(g.fitness_level || "intermediate");
           setTargetDate(g.target_date || "");
         }
       } catch {
-        // ignore — User sieht leere Felder
+        setProfileError(t("settings.profileLoadFailed"));
       } finally {
         setProfileLoading(false);
       }
     };
     load();
-  }, []);
+    return () => controller.abort();
+  }, [isGuest, t]);
 
-  // Watch-Status laden
+  // Watch-Status laden + Provider-Connected-Param erkennen
   useEffect(() => {
+    if (isGuest) {
+      setWatchLoading(false);
+      return;
+    }
+    const controller = new AbortController();
     const loadWatch = async () => {
       try {
-        const { data } = await api.get("/watch/status");
+        const { data } = await api.get("/watch/status", { signal: controller.signal });
         const ids = new Set<string>(
           (data.connected || []).map((c: { provider: string }) => c.provider)
         );
         setConnectedProviders(ids);
-        setStravaAvailable(!!data.strava_available);
+        // Build set of configured providers from availability flags
+        const avail = new Set<string>();
+        avail.add("garmin");      // always — uses garminconnect SSO
+        if (data.strava_available) avail.add("strava");
+        avail.add("apple_watch"); // always — uses pairing code
+        setAvailableProviders(avail);
       } catch {
-        // ignore
+        // Watch status failure is non-critical — UI degrades gracefully
       } finally {
         setWatchLoading(false);
       }
     };
     loadWatch();
-  }, []);
 
-  const handleConnect = async (p: typeof PROVIDERS[number]) => {
-    if (p.type === "credentials" || p.type === "file_upload") {
-      setExpandedProvider(expandedProvider === p.id ? null : p.id);
-      setUploadFile(null);
-      setUploadMsg("");
-      setProviderErrors((prev) => ({ ...prev, [p.id]: "" }));
-      return;
+    // Detect ?provider=<name> after OAuth redirect or Garmin login
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const provider = params.get("provider");
+      if (provider) {
+        setConnectedBanner(provider);
+        window.history.replaceState({}, "", window.location.pathname);
+        queryClient.invalidateQueries({ queryKey: ["training-week"] });
+        queryClient.invalidateQueries({ queryKey: ["training-stats"] });
+        queryClient.invalidateQueries({ queryKey: ["metrics-today"] });
+        queryClient.invalidateQueries({ queryKey: ["metrics-week"] });
+        queryClient.invalidateQueries({ queryKey: ["metrics-recovery"] });
+        queryClient.invalidateQueries({ queryKey: ["streak"] });
+        queryClient.invalidateQueries({ queryKey: ["achievements"] });
+        clearTimeout(connectedBannerTimerRef.current);
+        connectedBannerTimerRef.current = setTimeout(() => setConnectedBanner(null), 6000);
+      }
     }
-    // OAuth (Strava)
-    if (!p.connectPath) return;
+
+    return () => controller.abort();
+  }, [queryClient, isGuest]);
+
+  const handleConnect = useCallback(async (p: typeof PROVIDERS[number]) => {
     setConnectingProvider(p.id);
     setProviderErrors((prev) => ({ ...prev, [p.id]: "" }));
     try {
-      const resp = await api.get(p.connectPath);
-      if (resp.data.auth_url) window.location.href = resp.data.auth_url;
+      const { data } = await api.get<{ auth_url: string }>(p.connectPath!);
+      window.location.href = data.auth_url;
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "";
       setProviderErrors((prev) => ({ ...prev, [p.id]: detail || "Verbindung fehlgeschlagen." }));
     } finally {
       setConnectingProvider(null);
     }
-  };
+  }, []);
 
-  const handleGarminLogin = async () => {
+  const handleApplePair = useCallback(async () => {
+    setApplePairLoading(true);
+    setProviderErrors((prev) => ({ ...prev, apple_watch: "" }));
+    try {
+      const { data } = await api.post<{ pairing_token: string }>("/watch/apple/pair");
+      setApplePairToken(data.pairing_token);
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "";
+      setProviderErrors((prev) => ({ ...prev, apple_watch: detail || "Kopplung fehlgeschlagen." }));
+    } finally {
+      setApplePairLoading(false);
+    }
+  }, []);
+
+  const handleGarminLogin = useCallback(async () => {
     if (!garminEmail || !garminPassword) return;
     setGarminLoading(true);
     setProviderErrors((prev) => ({ ...prev, garmin: "" }));
     try {
-      await api.post("/watch/garmin/login", { email: garminEmail, password: garminPassword });
-      setConnectedProviders((prev) => new Set(Array.from(prev).concat("garmin")));
-      setExpandedProvider(null);
-      setGarminEmail("");
-      setGarminPassword("");
+      // Garmin SSO can take 60-120s — override the global 30s timeout
+      await api.post("/watch/garmin/login", { email: garminEmail, password: garminPassword }, { timeout: 120000 });
+      // Always redirect relative so we don't depend on FRONTEND_URL being correctly configured
+      window.location.href = window.location.pathname + "?provider=garmin";
     } catch (err: unknown) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "";
-      setProviderErrors((prev) => ({ ...prev, garmin: detail || "Login fehlgeschlagen. Prüfe E-Mail und Passwort." }));
-    } finally {
+      const axiosErr = err as { code?: string; response?: { data?: { detail?: string } } };
+      const timedOut = axiosErr.code === "ECONNABORTED";
+      const detail = axiosErr.response?.data?.detail ?? "";
+      setProviderErrors((prev) => ({
+        ...prev,
+        garmin: timedOut
+          ? "Verbindung dauerte zu lang. Bitte nochmal versuchen."
+          : detail || "Login fehlgeschlagen. Prüfe E-Mail und Passwort.",
+      }));
       setGarminLoading(false);
     }
-  };
+  }, [garminEmail, garminPassword]);
 
-  const handleFileUpload = async (providerId: string) => {
-    if (!uploadFile) return;
-    setUploadLoading(true);
-    setUploadMsg("");
-    try {
-      const form = new FormData();
-      form.append("provider", providerId);
-      form.append("file", uploadFile);
-      const resp = await api.post("/watch/upload-gpx", form, { headers: { "Content-Type": "multipart/form-data" } });
-      setConnectedProviders((prev) => new Set(Array.from(prev).concat(providerId)));
-      setUploadMsg(`✓ ${resp.data.activity_name} importiert`);
-      setTimeout(() => setExpandedProvider(null), 2000);
-    } catch (err: unknown) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "";
-      setUploadMsg(`! ${detail || "Upload fehlgeschlagen."}`);
-    } finally {
-      setUploadLoading(false);
-    }
-  };
-
-  const handleDisconnect = async (providerId: string, disconnectPath: string) => {
+  const handleDisconnect = useCallback(async (providerId: string, disconnectPath: string) => {
     setDisconnectingProvider(providerId);
     setProviderErrors((prev) => ({ ...prev, [providerId]: "" }));
     try {
@@ -255,10 +262,11 @@ export default function EinstellungenPage() {
     } finally {
       setDisconnectingProvider(null);
     }
-  };
+  }, []);
 
-  const saveProfile = async () => {
+  const saveProfile = useCallback(async () => {
     setProfileSaving(true);
+    setProfileError("");
     try {
       await api.put("/user/profile", {
         name,
@@ -268,39 +276,38 @@ export default function EinstellungenPage() {
         height_cm: heightCm,
       });
       setProfileSaved(true);
-      setTimeout(() => setProfileSaved(false), 2000);
+      clearTimeout(profileSavedTimerRef.current);
+      profileSavedTimerRef.current = setTimeout(() => setProfileSaved(false), 2000);
     } catch {
-      // silent
+      setProfileError(t("settings.profileSaveFailed"));
     } finally {
       setProfileSaving(false);
     }
-  };
+  }, [name, birthDate, gender, weightKg, heightCm, t]);
 
-  const saveGoals = async () => {
+  const saveGoals = useCallback(async () => {
     if (!goalDescription.trim()) return;
     setGoalSaving(true);
     setGoalError(false);
     try {
       await api.post("/user/goals", {
-        sport,
+        sport: Array.from(sports).join(",") || "running",
         goal_description: goalDescription,
         weekly_hours: weeklyHours,
         fitness_level: fitnessLevel,
         target_date: targetDate || null,
       });
       setGoalSaved(true);
-      setGoalError(false);
-      setTimeout(() => setGoalSaved(false), 2000);
+      clearTimeout(goalSavedTimerRef.current);
+      goalSavedTimerRef.current = setTimeout(() => setGoalSaved(false), 2000);
     } catch {
       setGoalError(true);
     } finally {
       setGoalSaving(false);
     }
-  };
+  }, [goalDescription, sports, weeklyHours, fitnessLevel, targetDate]);
 
-
-
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     try {
       await api.post("/auth/keycloak/logout", { refresh_token: "" });
     } catch {
@@ -308,20 +315,53 @@ export default function EinstellungenPage() {
     }
     logout();
     router.replace("/login");
-  };
+  }, [logout, router]);
 
-  const handleDeleteAccount = async () => {
+  const handleCancelPasswordChange = useCallback(() => {
+    setShowPasswordForm(false);
+    setPasswordError("");
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+  }, []);
+
+  const handleFileImport = useCallback(async () => {
+    if (!importFile) return;
+    setImportLoading(true);
+    setImportError("");
+    setImportResult(null);
+    try {
+      const form = new FormData();
+      form.append("file", importFile);
+      const { data } = await api.post("/watch/import/file", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 60000,
+      });
+      setImportResult(data);
+      setImportFile(null);
+      queryClient.invalidateQueries({ queryKey: ["training-week"] });
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { detail?: string } } };
+      setImportError(e?.response?.data?.detail ?? "Import fehlgeschlagen.");
+    } finally {
+      setImportLoading(false);
+    }
+  }, [importFile, queryClient]);
+
+  const handleDeleteAccount = useCallback(async () => {
     setDeleting(true);
+    setDeleteError("");
     try {
       await api.delete("/user/account");
       logout();
       router.replace("/login");
     } catch {
+      setDeleteError(t("settings.deleteAccountFailed"));
       setDeleting(false);
     }
-  };
+  }, [logout, router, t]);
 
-  const handleChangePassword = async () => {
+  const handleChangePassword = useCallback(async () => {
     setPasswordError("");
     if (!currentPassword || !newPassword || !confirmPassword) {
       setPasswordError(t("settings.allFieldsRequired"));
@@ -331,7 +371,7 @@ export default function EinstellungenPage() {
       setPasswordError(t("settings.passwordTooShort"));
       return;
     }
-    if (!newPassword.split("").some((c) => /[^a-zA-Z]/.test(c))) {
+    if (!/[^a-zA-Z]/.test(newPassword)) {
       setPasswordError(t("settings.passwordSpecialChar"));
       return;
     }
@@ -349,7 +389,8 @@ export default function EinstellungenPage() {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      setTimeout(() => {
+      clearTimeout(passwordSavedTimerRef.current);
+      passwordSavedTimerRef.current = setTimeout(() => {
         setPasswordSaved(false);
         setShowPasswordForm(false);
       }, 2000);
@@ -358,7 +399,77 @@ export default function EinstellungenPage() {
     } finally {
       setPasswordSaving(false);
     }
-  };
+  }, [currentPassword, newPassword, confirmPassword, t]);
+
+  // Memoized derived values — avoid recomputing on every render
+  const today = useMemo(() => new Date().toISOString().split("T")[0], []);
+  const tomorrow = useMemo(
+    () => new Date(Date.now() + 86400000).toISOString().split("T")[0],
+    []
+  );
+  const connectedList = useMemo(
+    () => PROVIDERS.filter((p) => connectedProviders.has(p.id)),
+    [connectedProviders]
+  );
+  const unconnectedList = useMemo(
+    () => PROVIDERS.filter((p) => !connectedProviders.has(p.id) && availableProviders.has(p.id)),
+    [connectedProviders, availableProviders]
+  );
+  // Derive the selected provider from unconnectedList to avoid a second PROVIDERS.find in JSX
+  const selectedProviderData = useMemo(
+    () => unconnectedList.find((pr) => pr.id === selectedProvider) ?? null,
+    [unconnectedList, selectedProvider]
+  );
+
+  if (isGuest) {
+    return (
+      <div className="flex flex-col">
+        {/* Header */}
+        <div className="px-5 pt-5 pb-4 border-b border-border">
+          <span className="font-pixel text-blue text-xl">{t("settings.title")}</span>
+        </div>
+        {/* Gast-Banner */}
+        <div className="px-5 py-5 border-b border-border">
+          <p className="font-pixel text-blue text-sm mb-2">GAST-MODUS</p>
+          <p className="text-xs font-sans text-textDim leading-relaxed mb-4">
+            Registriere dich kostenlos für vollständigen Zugriff: Profil, Ziele, verbundene Geräte und mehr.
+          </p>
+          <div className="flex flex-col gap-2">
+            <button
+              onClick={() => router.push("/register")}
+              className="w-full border border-blue text-blue text-xs tracking-widest uppercase font-sans py-3 hover:bg-blueDim transition-colors"
+            >
+              › Kostenlos registrieren
+            </button>
+            <button
+              onClick={() => router.push("/login")}
+              className="w-full border border-border text-textDim text-xs tracking-widest uppercase font-sans py-3 hover:border-textDim transition-colors"
+            >
+              › Einloggen
+            </button>
+          </div>
+        </div>
+        {/* Uhr verbinden — Login erforderlich */}
+        <div className="px-5 py-5 border-b border-border">
+          <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-4">Verbundene Geräte</p>
+          <div className="border border-border px-4 py-5">
+            <p className="font-pixel text-blue text-sm mb-2">LOGIN ERFORDERLICH</p>
+            <p className="text-xs font-sans text-textDim leading-relaxed mb-4">
+              Verbinde deine Sportuhr oder Fitness-Tracker — dafür ist ein Account notwendig.
+            </p>
+            <button
+              onClick={() => router.push("/register")}
+              className="w-full border border-blue text-blue text-xs tracking-widest uppercase font-sans py-2.5 hover:bg-blueDim transition-colors"
+            >
+              › Jetzt registrieren
+            </button>
+          </div>
+        </div>
+        {/* Language */}
+        <LanguageSwitcher />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col">
@@ -390,6 +501,7 @@ export default function EinstellungenPage() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 maxLength={100}
+                autoComplete="name"
                 className="w-full bg-transparent text-sm font-sans text-textMain outline-none"
               />
             </div>
@@ -400,6 +512,7 @@ export default function EinstellungenPage() {
                 type="date"
                 value={birthDate}
                 onChange={(e) => setBirthDate(e.target.value)}
+                max={today}
                 className="w-full bg-transparent text-sm font-sans text-textMain outline-none"
               />
             </div>
@@ -409,7 +522,7 @@ export default function EinstellungenPage() {
               <select
                 value={gender}
                 onChange={(e) => setGender(e.target.value)}
-                className="w-full bg-transparent text-sm font-sans text-textMain outline-none"
+                className="w-full bg-bg text-sm font-sans text-textMain outline-none"
               >
                 <option value="">{t("settings.genderUnspecified")}</option>
                 <option value="male">{t("settings.genderMale")}</option>
@@ -425,8 +538,9 @@ export default function EinstellungenPage() {
                   type="number"
                   inputMode="decimal"
                   placeholder="z.B. 75"
+                  min={0}
                   value={weightKg ?? ""}
-                  onChange={(e) => setWeightKg(e.target.value ? Number(e.target.value) : null)}
+                  onChange={(e) => { const v = parseFloat(e.target.value); setWeightKg(e.target.value === "" || isNaN(v) ? null : v); }}
                   className="w-full bg-transparent text-sm font-sans text-textMain outline-none"
                 />
               </div>
@@ -436,8 +550,9 @@ export default function EinstellungenPage() {
                   type="number"
                   inputMode="numeric"
                   placeholder="z.B. 180"
+                  min={0}
                   value={heightCm ?? ""}
-                  onChange={(e) => setHeightCm(e.target.value ? Number(e.target.value) : null)}
+                  onChange={(e) => { const v = parseFloat(e.target.value); setHeightCm(e.target.value === "" || isNaN(v) ? null : v); }}
                   className="w-full bg-transparent text-sm font-sans text-textMain outline-none"
                 />
               </div>
@@ -449,6 +564,9 @@ export default function EinstellungenPage() {
             >
               {profileSaved ? t("settings.profileSaved") : profileSaving ? "..." : `› ${t("settings.saveProfile")}`}
             </button>
+            {profileError && (
+              <p className="text-xs font-sans text-danger mt-2" role="alert">{profileError}</p>
+            )}
           </div>
         )}
       </div>
@@ -470,25 +588,32 @@ export default function EinstellungenPage() {
             <div>
               <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-2">{t("settings.sport")}</p>
               <div className="grid grid-cols-2 gap-2">
-                {SPORTS.map((id) => (
-                  <button
-                    key={id}
-                    onClick={() => setSport(id)}
-                    className={`border py-2 text-xs tracking-widest uppercase font-sans transition-colors ${
-                      sport === id
-                        ? "border-blue text-blue bg-blueDim"
-                        : "border-border text-textDim hover:border-textDim"
-                    }`}
-                  >
-                    {t(`sports.${id}`)}
-                  </button>
-                ))}
+                {SPORTS.map((id) => {
+                  const active = sports.has(id);
+                  return (
+                    <button
+                      key={id}
+                      onClick={() => setSports((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(id)) { next.delete(id); } else { next.add(id); }
+                        return next.size === 0 ? prev : next;
+                      })}
+                      className={`border py-2.5 text-xs tracking-widest uppercase font-sans transition-colors flex items-center justify-center gap-1.5 ${
+                        active
+                          ? "border-blue text-blue bg-blueDim"
+                          : "border-border text-textDim hover:border-textDim"
+                      }`}
+                    >
+                      {t(`sports.${id}`)}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
             {/* Ziel */}
-            <div className="border border-border flex items-start px-3 py-3 gap-2">
-              <span className="font-mono text-blue mt-0.5 shrink-0">›</span>
+            <div className="border border-border flex items-center px-3 py-3 gap-2">
+              <span className="font-mono text-blue shrink-0">›</span>
               <textarea
                 placeholder={t("settings.goalPlaceholder")}
                 value={goalDescription}
@@ -507,7 +632,8 @@ export default function EinstellungenPage() {
               <input
                 type="range" min={1} max={20} value={weeklyHours}
                 onChange={(e) => setWeeklyHours(Number(e.target.value))}
-                className="w-full accent-blue h-[3px]"
+                className="w-full metric-range"
+                style={{ "--range-fill": `${(weeklyHours - 1) / 19 * 100}%` } as React.CSSProperties}
               />
               <div className="flex justify-between mt-1">
                 <span className="text-xs font-sans text-textDim">1h</span>
@@ -542,13 +668,14 @@ export default function EinstellungenPage() {
                 type="date"
                 value={targetDate}
                 onChange={(e) => setTargetDate(e.target.value)}
+                min={tomorrow}
                 className="bg-transparent text-sm font-sans text-textMain outline-none w-full"
               />
             </div>
 
             {/* Speichern Button */}
             {goalError && (
-              <p className="text-xs font-sans text-danger tracking-wider">! {t("settings.goalError")}</p>
+              <p className="text-xs font-sans text-danger tracking-wider" role="alert">! {t("settings.goalError")}</p>
             )}
             <button
               onClick={saveGoals}
@@ -568,143 +695,203 @@ export default function EinstellungenPage() {
       {/* Verbundene Geräte */}
       <div className="px-5 py-5 border-b border-border">
         <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-4">Verbundene Geräte</p>
-        {watchLoading ? (
-          <div className="h-12 bg-border animate-pulse" />
-        ) : (
-          <div className="flex flex-col gap-3">
-            {PROVIDERS.map((p) => {
-              const isConnected = connectedProviders.has(p.id);
-              const isDisconnecting = disconnectingProvider === p.id;
-              const isConnecting = connectingProvider === p.id;
-              const isExpanded = expandedProvider === p.id;
-              const connectLabel = p.type === "credentials" ? "Login" : p.type === "file_upload" ? "Importieren" : "Verbinden";
-              const err = providerErrors[p.id];
-              return (
-                <div key={p.id} className="border border-border">
-                  <div className="flex items-center justify-between px-4 py-3">
-                    <div>
-                      <p className="text-xs tracking-widest uppercase font-sans text-textMain">{p.name}</p>
-                      <p className={`text-[10px] font-sans mt-0.5 ${isConnected ? "text-blue" : "text-textDim"}`}>
-                        {isConnected ? "● Verbunden" : isExpanded ? "▲ Schließen" : p.hint}
-                      </p>
-                    </div>
-                    {isConnected ? (
-                      <button
-                        onClick={() => handleDisconnect(p.id, p.disconnectPath)}
-                        disabled={isDisconnecting}
-                        className="flex items-center gap-1.5 border border-border text-textDim text-[10px] uppercase font-sans px-2 py-1.5 hover:border-danger hover:text-danger transition-colors disabled:opacity-40"
-                      >
-                        <Unlink size={11} />
-                        {isDisconnecting ? "..." : "Trennen"}
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => handleConnect(p)}
-                        disabled={isConnecting}
-                        className={`text-[10px] font-sans border px-2 py-1.5 uppercase transition-colors disabled:opacity-40 ${
-                          isExpanded ? "border-border text-textDim hover:border-textMain" : "border-blue text-blue hover:bg-blueDim"
-                        }`}
-                      >
-                        {isConnecting ? "..." : isExpanded ? "✕" : connectLabel}
-                      </button>
-                    )}
-                  </div>
-                  {/* Inline-Form */}
-                  {!isConnected && isExpanded && p.type === "credentials" && (
-                    <div className="border-t border-border px-4 py-4 flex flex-col gap-3">
-                      <p className="text-[10px] font-sans text-textDim">Garmin-Connect Zugangsdaten. Nur Tokens werden gespeichert.</p>
-                      <div className="border border-border px-3 py-2">
-                        <p className="text-[10px] tracking-widest uppercase text-textDim font-sans mb-1">E-Mail</p>
-                        <input type="email" value={garminEmail} onChange={(e) => setGarminEmail(e.target.value)}
-                          className="w-full bg-transparent text-sm font-sans text-textMain outline-none" autoComplete="email" />
-                      </div>
-                      <div className="border border-border px-3 py-2">
-                        <p className="text-[10px] tracking-widest uppercase text-textDim font-sans mb-1">Passwort</p>
-                        <input type="password" value={garminPassword} onChange={(e) => setGarminPassword(e.target.value)}
-                          className="w-full bg-transparent text-sm font-sans text-textMain outline-none" autoComplete="current-password"
-                          onKeyDown={(e) => e.key === "Enter" && handleGarminLogin()} />
-                      </div>
-                      {err && <p className="text-xs font-sans text-danger">! {err}</p>}
-                      <button onClick={handleGarminLogin} disabled={garminLoading || !garminEmail || !garminPassword}
-                        className="w-full border border-blue text-blue text-xs uppercase tracking-widest font-sans py-2.5 hover:bg-blueDim disabled:opacity-40">
-                        {garminLoading ? "Verbinde..." : "› Anmelden"}
-                      </button>
-                    </div>
-                  )}
-                  {!isConnected && isExpanded && p.type === "file_upload" && (
-                    <div className="border-t border-border px-4 py-4 flex flex-col gap-3">
-                      <p className="text-[10px] font-sans text-textDim">
-                        {p.id === "polar"
-                          ? "sport.polar.com › Training › Aktivität auswählen › Export GPX"
-                          : "GPX-Datei aus iOS Health App oder kompatibler App exportieren"}
-                      </p>
-                      <label className="border border-border px-4 py-4 flex items-center justify-between cursor-pointer hover:border-blue transition-colors">
-                        <span className="text-xs font-sans text-textDim tracking-widest uppercase truncate">{uploadFile ? uploadFile.name : "GPX / TCX wählen"}</span>
-                        <span className="text-xs font-sans text-blue ml-2 shrink-0">› Auswählen</span>
-                        <input type="file" accept=".gpx,.tcx,.xml" className="hidden"
-                          onChange={(e) => { setUploadFile(e.target.files?.[0] ?? null); setUploadMsg(""); }} />
-                      </label>
-                      {uploadMsg && <p className={`text-xs font-sans ${uploadMsg.startsWith("!") ? "text-danger" : "text-blue"}`}>{uploadMsg}</p>}
-                      <button onClick={() => handleFileUpload(p.id)} disabled={uploadLoading || !uploadFile}
-                        className="w-full border border-blue text-blue text-xs uppercase tracking-widest font-sans py-2.5 hover:bg-blueDim disabled:opacity-40">
-                        {uploadLoading ? "Wird importiert..." : "› Importieren"}
-                      </button>
-                    </div>
-                  )}
-                  {!isConnected && !isExpanded && err && (
-                    <p className="px-4 pb-3 text-[10px] font-sans text-danger">! {err}</p>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Achievements */}
-      <AchievementsSection />
-
-      {/* Abonnement / Billing */}
-      <div className="px-5 py-5 border-b border-border">
-        <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-4">{t("settings.subscription")}</p>
-        {billingLoading ? (
-          <div className="h-14 bg-border animate-pulse" />
-        ) : (
-          <div className="flex flex-col gap-3">
-            <div className="flex justify-between items-center border border-border px-4 py-3">
-              <div>
-                <p className="text-xs tracking-widest uppercase font-sans text-textMain">
-                  {subscription?.tier === "pro" ? "PRO" : subscription?.tier === "elite" ? "ELITE" : "FREE"}
-                </p>
-                {subscription?.expires_at && (
-                  <p className="text-xs font-sans text-textDim mt-0.5">
-                    {t("settings.until")} {new Date(subscription.expires_at).toLocaleDateString("de-DE")}
-                  </p>
-                )}
-              </div>
-              {subscription?.tier !== "free" && subscription?.stripe_customer_id ? (
-                <button
-                  onClick={openPortal}
-                  disabled={billingLoading}
-                  className="border border-border text-[10px] uppercase font-sans px-2 py-1.5 text-textDim hover:border-textDim transition-colors disabled:opacity-40"
-                >
-                  {t("settings.manage")}
-                </button>
-              ) : process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO_MONTHLY ? (
-                <button
-                  onClick={() => createCheckout(process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO_MONTHLY!)}
-                  disabled={billingLoading}
-                  className="border border-blue text-blue text-[10px] uppercase font-sans px-2 py-1.5 hover:bg-blueDim transition-colors disabled:opacity-40"
-                >
-                  Upgrade
-                </button>
-              ) : (
-                <span className="text-[10px] font-sans text-textDim uppercase">Bald</span>
-              )}
+        {connectedBanner && (
+          <div className="border border-blue bg-blueDim px-4 py-3 mb-4 flex items-start gap-3">
+            <Check size={14} strokeWidth={2} className="text-blue mt-0.5 shrink-0" />
+            <div>
+              <p className="text-xs font-sans text-blue tracking-widest uppercase font-medium">
+                {connectedBanner.toUpperCase().replaceAll("_", " ")} verbunden
+              </p>
+              <p className="text-[10px] font-sans text-textDim mt-0.5">
+                Letzten 12 Monate werden im Hintergrund importiert …
+              </p>
             </div>
           </div>
         )}
+        {watchLoading ? (
+          <div className="h-12 bg-border animate-pulse" />
+        ) : (
+          <div className="flex flex-col gap-4">
+            {/* Already connected providers */}
+            {connectedList.map((p) => {
+              const isDisconnecting = disconnectingProvider === p.id;
+              const err = providerErrors[p.id];
+              return (
+                <div key={p.id} className="border border-blue flex items-center justify-between px-4 py-3">
+                  <div>
+                    <p className="text-xs tracking-widest uppercase font-sans text-textMain">{p.name}</p>
+                    <p className="text-[10px] font-sans mt-0.5 text-blue">● Verbunden</p>
+                    {err && <p className="text-[10px] font-sans text-danger mt-0.5" role="alert">! {err}</p>}
+                  </div>
+                  <button
+                    onClick={() => handleDisconnect(p.id, p.disconnectPath)}
+                    disabled={isDisconnecting}
+                    className="flex items-center gap-1.5 border border-border text-textDim text-[10px] uppercase font-sans px-2 py-1.5 hover:border-danger hover:text-danger transition-colors disabled:opacity-40"
+                  >
+                    <Unlink size={11} />
+                    {isDisconnecting ? "..." : "Trennen"}
+                  </button>
+                </div>
+              );
+            })}
+
+            {/* Add new device via dropdown */}
+            {unconnectedList.length > 0 && (
+              <div className="border border-border">
+                <div className="px-4 py-3">
+                  <p className="text-[10px] tracking-widest uppercase text-textDim font-sans mb-2">Gerät hinzufügen</p>
+                  <select
+                    value={selectedProvider}
+                    onChange={(e) => {
+                      setSelectedProvider(e.target.value);
+                      setProviderErrors({});
+                    }}
+                    className="w-full bg-bg text-sm font-sans text-textMain outline-none px-3 py-2"
+                  >
+                    <option value="">– Uhr / Tracker wählen –</option>
+                    {unconnectedList.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Connect form for selected provider */}
+                {selectedProviderData && (() => {
+                  const p = selectedProviderData;
+                  const isConnecting = connectingProvider === p.id;
+                  const err = providerErrors[p.id];
+                  const connectLabel = p.type === "credentials" ? "Anmelden & Daten importieren" : p.type === "apple_pair" ? "Koppelcode generieren" : "Mit " + p.name + " verbinden";
+                  return (
+                    <div className="border-t border-border px-4 py-4 flex flex-col gap-3">
+                      <p className="text-[10px] font-sans text-textDim">{p.hint}</p>
+                      {p.type === "credentials" && (
+                        <>
+                          <div className="border border-border px-3 py-2">
+                            <p className="text-[10px] tracking-widest uppercase text-textDim font-sans mb-1">E-Mail</p>
+                            <input type="email" value={garminEmail} onChange={(e) => setGarminEmail(e.target.value)}
+                              className="w-full bg-transparent text-sm font-sans text-textMain outline-none" autoComplete="email" />
+                          </div>
+                          <div className="border border-border px-3 py-2">
+                            <p className="text-[10px] tracking-widest uppercase text-textDim font-sans mb-1">Passwort</p>
+                            <input type="password" value={garminPassword} onChange={(e) => setGarminPassword(e.target.value)}
+                              className="w-full bg-transparent text-sm font-sans text-textMain outline-none" autoComplete="current-password"
+                              onKeyDown={(e) => e.key === "Enter" && handleGarminLogin()} />
+                          </div>
+                          {err && <p className="text-xs font-sans text-danger" role="alert">! {err}</p>}
+                          <button onClick={handleGarminLogin} disabled={garminLoading || !garminEmail || !garminPassword}
+                            className="w-full border border-blue text-blue text-xs uppercase tracking-widest font-sans py-2.5 hover:bg-blueDim disabled:opacity-40">
+                            {garminLoading ? "Verbinde & importiere..." : "› " + connectLabel}
+                          </button>
+                        </>
+                      )}
+                      {p.type === "apple_pair" && (
+                        <>
+                          <p className="text-[10px] font-sans text-textDim leading-relaxed">
+                            Öffne die TrainIQ iOS-App → Einstellungen → Apple Watch verbinden und gib den Code ein:
+                          </p>
+                          {applePairToken ? (
+                            <div className="border border-blue px-4 py-5 text-center">
+                              <p className="text-[10px] tracking-widest uppercase text-textDim font-sans mb-2">Koppelcode</p>
+                              <p className="font-pixel text-blue text-2xl tracking-widest">{applePairToken}</p>
+                              <p className="text-[10px] font-sans text-textDim mt-3">Code gilt 10 Minuten</p>
+                            </div>
+                          ) : (
+                            <button onClick={handleApplePair} disabled={applePairLoading}
+                              className="w-full border border-blue text-blue text-xs uppercase tracking-widest font-sans py-2.5 hover:bg-blueDim disabled:opacity-40">
+                              {applePairLoading ? "Generiere Code..." : "› " + connectLabel}
+                            </button>
+                          )}
+                          {err && <p className="text-xs font-sans text-danger" role="alert">! {err}</p>}
+                        </>
+                      )}
+                      {p.type === "oauth" && (
+                        <>
+                          {err && (
+                            err.includes("API-Schlüssel fehlt") ? (
+                              <p className="text-[10px] font-sans text-textDim border border-border px-3 py-2 leading-relaxed" role="alert">
+                                ⚙ {err}
+                              </p>
+                            ) : (
+                              <p className="text-xs font-sans text-danger" role="alert">! {err}</p>
+                            )
+                          )}
+                          <button onClick={() => handleConnect(p)} disabled={isConnecting}
+                            className="w-full border border-blue text-blue text-xs uppercase tracking-widest font-sans py-2.5 hover:bg-blueDim disabled:opacity-40">
+                            {isConnecting ? "Weiterleitung..." : "› " + connectLabel}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  );
+                })()
+                }
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Datei-Import */}
+      {!isGuest && (
+        <div className="px-5 py-5 border-b border-border">
+          <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-1">Datei-Import</p>
+          <p className="text-[10px] font-sans text-textDim mb-4 leading-relaxed">
+            Importiere Trainings direkt aus deiner Uhr — kein API-Key nötig.
+            Unterstützt: <span className="text-textMain">.fit</span> (Garmin, Suunto, COROS, Wahoo),{" "}
+            <span className="text-textMain">.tcx</span> (Garmin, Polar),{" "}
+            <span className="text-textMain">.gpx</span> (alle GPS-Uhren),{" "}
+            <span className="text-textMain">.csv</span> (Fitbit, Zepp/Amazfit)
+          </p>
+          <div className="border border-border">
+            <div
+              className="px-4 py-6 flex flex-col items-center gap-3 cursor-pointer hover:bg-[rgba(255,255,255,0.02)] transition-colors"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".fit,.tcx,.gpx,.csv"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  setImportFile(f);
+                  setImportResult(null);
+                  setImportError("");
+                  e.target.value = "";
+                }}
+              />
+              {importFile ? (
+                <p className="text-xs font-sans text-textMain tracking-wide">{importFile.name}</p>
+              ) : (
+                <p className="text-[10px] font-sans text-textDim tracking-widest uppercase">
+                  Datei auswählen (.fit / .tcx / .gpx / .csv)
+                </p>
+              )}
+            </div>
+            {importFile && (
+              <div className="border-t border-border px-4 py-3 flex flex-col gap-2">
+                {importError && (
+                  <p className="text-xs font-sans text-danger" role="alert">! {importError}</p>
+                )}
+                {importResult && (
+                  <p className="text-[10px] font-sans text-blue">
+                    ✓ {importResult.message}
+                  </p>
+                )}
+                <button
+                  disabled={importLoading}
+                  onClick={handleFileImport}
+                  className="w-full border border-blue text-blue text-xs uppercase tracking-widest font-sans py-2.5 hover:bg-blueDim disabled:opacity-40"
+                >
+                  {importLoading ? "Importiere..." : "› Importieren"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Push Notifications */}
       <PushNotificationSettings />
@@ -740,6 +927,7 @@ export default function EinstellungenPage() {
                     type="password"
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
+                    autoComplete="current-password"
                     className="w-full bg-transparent text-sm font-sans text-textMain outline-none"
                   />
                 </div>
@@ -749,6 +937,7 @@ export default function EinstellungenPage() {
                     type="password"
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
+                    autoComplete="new-password"
                     className="w-full bg-transparent text-sm font-sans text-textMain outline-none"
                   />
                 </div>
@@ -758,15 +947,16 @@ export default function EinstellungenPage() {
                     type="password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
+                    autoComplete="new-password"
                     className="w-full bg-transparent text-sm font-sans text-textMain outline-none"
                   />
                 </div>
                 {passwordError && (
-                  <p className="text-xs font-sans text-danger tracking-wider">! {passwordError}</p>
+                  <p className="text-xs font-sans text-danger tracking-wider" role="alert">! {passwordError}</p>
                 )}
                 <div className="flex gap-3">
                   <button
-                    onClick={() => { setShowPasswordForm(false); setPasswordError(""); }}
+                    onClick={handleCancelPasswordChange}
                     className="flex-1 border border-border text-textDim text-xs tracking-widest uppercase font-sans py-2.5"
                   >
                     {t("settings.cancel")}
@@ -828,6 +1018,9 @@ export default function EinstellungenPage() {
                 {deleting ? "..." : t("settings.deleteConfirm")}
               </button>
             </div>
+            {deleteError && (
+              <p className="text-xs font-sans text-danger mt-3" role="alert">{deleteError}</p>
+            )}
           </div>
         )}
       </div>

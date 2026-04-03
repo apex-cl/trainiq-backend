@@ -2,7 +2,7 @@
 #
 # backup.sh — PostgreSQL Backup mit S3-Upload und automatischer Aufräumung
 #
-# Cron: Wird um 03:00 Uhr ausgeführt (siehe docker-compose.prod.yml)
+# Cron: Wird um 03:00 Uhr ausgeführt (siehe docker-compose.backend.yml)
 # Variablen: POSTGRES_HOST, POSTGRES_USER, POSTGRES_DB, POSTGRES_PASSWORD
 #            S3_BUCKET, S3_ENDPOINT (optional), BACKUP_RETENTION_DAYS
 

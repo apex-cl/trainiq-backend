@@ -16,6 +16,8 @@ from app.services.jwt_service import jwt_service
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 
+ALLOWED_SOCIAL_PROVIDERS = {"google", "github", "apple"}
+
 
 class TokenExchangeRequest(BaseModel):
     code: str
@@ -28,6 +30,19 @@ class RefreshTokenRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str
+
+
+@router.get("/social/{provider}")
+async def social_login(provider: str):
+    """Redirect to a specific social identity provider via Keycloak."""
+    if not settings.keycloak_enabled:
+        raise HTTPException(status_code=400, detail="Keycloak is not enabled.")
+    if provider not in ALLOWED_SOCIAL_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Unbekannter Anbieter.")
+    state = secrets.token_urlsafe(32)
+    redirect_uri = f"{settings.frontend_url}/api/auth/callback"
+    auth_url = keycloak_service.get_social_login_url(provider, redirect_uri, state)
+    return {"auth_url": auth_url, "state": state}
 
 
 @router.get("/login")

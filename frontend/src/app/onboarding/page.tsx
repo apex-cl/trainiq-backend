@@ -49,30 +49,29 @@ export default function OnboardingPage() {
   const [uploadMsg, setUploadMsg] = useState("");
 
   useEffect(() => {
-    const checkStatus = async () => {
-      try {
-        const resp = await api.get("/watch/status");
+    const controller = new AbortController();
+
+    api.get("/watch/status", { signal: controller.signal })
+      .then((resp) => {
         const ids = new Set<string>(
           (resp.data.connected || []).map((c: { provider: string }) => c.provider)
         );
         setConnectedProviders(ids);
-      } catch {
-        // Ignore
-      }
-    };
-    checkStatus();
+      })
+      .catch(() => {
+        // Watch status failure is non-critical on onboarding
+      });
 
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const provider = params.get("provider_connected");
       if (provider) setConnectedProviders((prev) => new Set(Array.from(prev).concat(provider)));
-      else if (window.location.search.includes("strava=connected"))
-        setConnectedProviders((prev) => new Set(Array.from(prev).concat("strava")));
     }
+
+    return () => controller.abort();
   }, []);
 
   const ONBOARDING_PROVIDERS = [
-    { id: "strava", label: "STRAVA",       type: "oauth" as const,       hint: "gratis unter strava.com/settings/api" },
     { id: "garmin", label: "GARMIN",       type: "credentials" as const, hint: "Garmin Connect E-Mail + Passwort" },
     { id: "polar",  label: "POLAR",        type: "file_upload" as const, hint: "GPX aus sport.polar.com exportieren" },
     { id: "apple",  label: "APPLE HEALTH", type: "file_upload" as const, hint: "GPX aus iOS Health exportieren" },
@@ -81,17 +80,6 @@ export default function OnboardingPage() {
   const handleProviderClick = async (p: typeof ONBOARDING_PROVIDERS[number]) => {
     if (p.type === "credentials") { setGarminModal(true); return; }
     if (p.type === "file_upload") { setUploadModal(p.id); setUploadFile(null); setUploadMsg(""); return; }
-    // OAuth
-    setConnectingProvider(p.id);
-    try {
-      const resp = await api.get("/watch/strava/connect");
-      if (resp.data.auth_url) window.location.href = resp.data.auth_url;
-    } catch {
-      setProviderMsg("Strava — gratis Key unter strava.com/settings/api eintragen.");
-      setTimeout(() => setProviderMsg(""), 4000);
-    } finally {
-      setConnectingProvider(null);
-    }
   };
 
   const handleGarminLogin = async () => {
@@ -135,8 +123,11 @@ export default function OnboardingPage() {
   const toggleSport = (id: string) =>
     setSelectedSports((prev) => prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]);
 
+  const [goalError, setGoalError] = useState(false);
+
   const saveGoals = async () => {
     setLoading(true);
+    setGoalError(false);
     try {
       await api.post("/user/goals", {
         sport: selectedSports[0] ?? "running",
@@ -147,7 +138,7 @@ export default function OnboardingPage() {
       });
       setStep(3);
     } catch {
-      setStep(3); // Continue anyway in dev mode or show error
+      setGoalError(true);
     } finally {
       setLoading(false);
     }
@@ -200,7 +191,7 @@ export default function OnboardingPage() {
             disabled={selectedSports.length === 0}
             className="w-full border border-blue text-blue text-xs tracking-widest uppercase font-sans py-3.5 hover:bg-blueDim transition-colors disabled:opacity-30"
           >
-            Weiter ──→
+            Weiter →
           </button>
         </div>
       )}
@@ -239,7 +230,8 @@ export default function OnboardingPage() {
             <input
               type="range" min={1} max={20} value={weeklyHours}
               onChange={(e) => setWeeklyHours(Number(e.target.value))}
-              className="w-full accent-blue h-[3px]"
+              className="w-full metric-range"
+              style={{ "--range-fill": `${(weeklyHours - 1) / 19 * 100}%` } as React.CSSProperties}
             />
             <div className="flex justify-between mt-1">
               <span className="text-xs font-sans text-textDim">1h</span>
@@ -267,6 +259,10 @@ export default function OnboardingPage() {
             </div>
           </div>
 
+          {goalError && (
+            <p className="text-xs font-sans text-danger tracking-widest">! Ziele konnten nicht gespeichert werden. Bitte versuche es erneut.</p>
+          )}
+
           <div className="flex gap-3">
             <button onClick={() => setStep(1)} className="flex-1 border border-border text-textDim text-xs tracking-widest uppercase font-sans py-3 hover:border-textDim transition-colors">
               ← Zurück
@@ -276,7 +272,7 @@ export default function OnboardingPage() {
               disabled={goal.length < 3 || loading}
               className="flex-1 border border-blue text-blue text-xs tracking-widest uppercase font-sans py-3 hover:bg-blueDim transition-colors disabled:opacity-30"
             >
-              {loading ? "Wird gespeichert..." : "Weiter ──→"}
+              {loading ? "Wird gespeichert..." : "Weiter →"}
             </button>
           </div>
         </div>

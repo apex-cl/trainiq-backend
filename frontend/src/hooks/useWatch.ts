@@ -10,8 +10,9 @@ export interface WatchConnection {
 
 export interface WatchStatus {
   connected: WatchConnection[];
-  strava_available: boolean;
   garmin_available: boolean;
+  strava_available: boolean;
+  apple_watch_available: boolean;
 }
 
 export function useWatch() {
@@ -34,24 +35,6 @@ export function useWatch() {
 
   useEffect(() => {
     fetchStatus();
-  }, [fetchStatus]);
-
-  const connectStrava = useCallback(async () => {
-    try {
-      const { data } = await api.get<{ auth_url: string }>("/watch/strava/connect");
-      window.location.href = data.auth_url;
-    } catch (e) {
-      setError("Strava-Verbindung fehlgeschlagen");
-    }
-  }, []);
-
-  const disconnectStrava = useCallback(async () => {
-    try {
-      await api.post("/watch/strava/disconnect");
-      await fetchStatus();
-    } catch (e) {
-      setError("Trennung fehlgeschlagen");
-    }
   }, [fetchStatus]);
 
   const connectGarmin = useCallback(async () => {
@@ -121,8 +104,6 @@ export function useWatch() {
     loading,
     error,
     refetch: fetchStatus,
-    connectStrava,
-    disconnectStrava,
     connectGarmin,
     disconnectGarmin,
     sync,

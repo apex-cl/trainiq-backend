@@ -24,9 +24,13 @@ export default function Providers({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handler = (event: PromiseRejectionEvent) => {
-      const status = event.reason?.response?.status;
-      if (status && [401, 404].includes(status)) return;
-      console.error("[TrainIQ] Unhandled rejection:", event.reason);
+      const reason = event.reason;
+      // Suppress expected HTTP status codes that are handled at the component level
+      const status = reason?.response?.status ?? reason?.status;
+      if (status === 401 || status === 404) return;
+      // Suppress AbortErrors from intentionally cancelled requests
+      if (reason?.name === "AbortError") return;
+      console.error("[TrainIQ] Unhandled rejection:", reason);
     };
     window.addEventListener("unhandledrejection", handler);
     return () => window.removeEventListener("unhandledrejection", handler);

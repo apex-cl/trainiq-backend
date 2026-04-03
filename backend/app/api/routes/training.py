@@ -18,46 +18,7 @@ from app.core.config import settings
 router = APIRouter()
 
 # ─── Redis Cache Helpers ──────────────────────────────────────────────────────
-# Use a module-level connection pool so we don't open/close a TCP connection
-# on every single cache call (critical: /plan alone called _cache_get + _cache_set
-# which was 2 connect/close round-trips before every response).
-
-import redis.asyncio as _aioredis
-
-_redis_pool: "_aioredis.Redis | None" = None
-
-
-def _get_redis() -> "_aioredis.Redis":
-    global _redis_pool
-    if _redis_pool is None:
-        _redis_pool = _aioredis.from_url(
-            settings.redis_url,
-            decode_responses=True,
-            max_connections=20,
-        )
-    return _redis_pool
-
-
-async def _cache_get(key: str) -> dict | list | None:
-    try:
-        raw = await _get_redis().get(key)
-        return json.loads(raw) if raw else None
-    except Exception:
-        return None
-
-
-async def _cache_set(key: str, value, ttl: int) -> None:
-    try:
-        await _get_redis().set(key, json.dumps(value), ex=ttl)
-    except Exception:
-        pass
-
-
-async def _cache_del(*keys: str) -> None:
-    try:
-        await _get_redis().delete(*keys)
-    except Exception:
-        pass
+from app.core.redis import cache_get as _cache_get, cache_set as _cache_set, cache_del as _cache_del
 
 
 def plan_to_dict(plan: TrainingPlan) -> dict:
@@ -132,9 +93,10 @@ async def get_week_plan(
     plans = plan_result.scalars().all()
     metric = metric_result.scalars().first()
 
+    planner = TrainingPlanner()
+
     # Generate plan if it doesn't exist yet
     if not plans:
-        planner = TrainingPlanner()
         plans = await planner.generate_week_plan(str(current_user.id), week_start, db)
 
     recovery_score = 70  # Default
@@ -149,8 +111,6 @@ async def get_week_plan(
             }
         )
         recovery_score = recovery_result["score"]
-
-    planner = TrainingPlanner()
     output = []
     for plan in plans:
         plan_dict = plan_to_dict(plan)
@@ -323,9 +283,10 @@ async def get_training_stats(
     completion_rate = round(total_completed / total_planned, 2) if total_planned > 0 else 0.0
 
     # Sport breakdown — aggregate completed counts per sport in DB
+    sport_col = TrainingPlan.sport
     sport_result = await db.execute(
         select(
-            func.coalesce(TrainingPlan.sport, "other").label("sport"),
+            sport_col,
             func.count().label("cnt"),
         )
         .where(
@@ -334,7 +295,7 @@ async def get_training_stats(
             TrainingPlan.date <= today,
             TrainingPlan.status == "completed",
         )
-        .group_by(func.coalesce(TrainingPlan.sport, "other"))
+        .group_by(sport_col)
     )
     by_sport = {row.sport: row.cnt for row in sport_result}
 

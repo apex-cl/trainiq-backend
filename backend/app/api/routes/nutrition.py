@@ -110,17 +110,25 @@ async def upload(
         logger.error(f"Nutrition photo analysis failed | user={user_id} | error={e}")
         raise HTTPException(
             status_code=502,
-            detail=f"Bild-Analyse fehlgeschlagen: {e}",
+            detail="Bild-Analyse fehlgeschlagen. Bitte versuche es erneut.",
         )
 
-    # 6. Gast-Counter NACH erfolgreicher Analyse atomar inkrementieren
+    # 6. Gast-Counter NACH erfolgreicher Analyse atomar inkrementieren (verhindert Race-Condition)
     if is_guest:
-        await db.execute(
+        res = await db.execute(
             update(GuestSession)
-            .where(GuestSession.id == current.id)
+            .where(
+                GuestSession.id == current.id,
+                GuestSession.photo_count < settings.guest_max_photos,
+            )
             .values(photo_count=GuestSession.photo_count + 1)
         )
         await db.commit()
+        if res.rowcount == 0:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Gast-Limit erreicht ({settings.guest_max_photos} Fotos). Bitte registrieren für mehr.",
+            )
         new_count = current.photo_count + 1
         return {
             "meal_name": analysis["meal_name"],
@@ -370,7 +378,3 @@ async def delete_meal(
     await db.delete(meal)
     await db.flush()
     return {"ok": True}
-
-    await db.delete(meal)
-    await db.commit()
-    return {"ok": True, "deleted_id": meal_id}

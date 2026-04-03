@@ -286,3 +286,60 @@ class TestUserModelKeycloakField:
         user = User(email="test@example.com", name="Test User", password_hash="hash")
 
         assert user.keycloak_id is None
+
+
+class TestSocialLogin:
+    @pytest.mark.asyncio
+    async def test_social_login_disabled_keycloak(self):
+        with patch("app.api.routes.auth_keycloak.settings") as mock_settings:
+            mock_settings.keycloak_enabled = False
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/auth/keycloak/social/google")
+                assert response.status_code == 400
+                assert "not enabled" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_social_login_unknown_provider_rejected(self):
+        with patch("app.api.routes.auth_keycloak.settings") as mock_settings:
+            mock_settings.keycloak_enabled = True
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/auth/keycloak/social/facebook")
+                assert response.status_code == 400
+                assert "Anbieter" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["google", "apple", "github"])
+    async def test_social_login_returns_auth_url(self, provider):
+        with patch("app.api.routes.auth_keycloak.settings") as mock_settings:
+            mock_settings.keycloak_enabled = True
+            mock_settings.frontend_url = "http://localhost:3000"
+
+            from app.services.keycloak_service import KeycloakService
+            real_service = KeycloakService()
+
+            with patch("app.api.routes.auth_keycloak.keycloak_service") as mock_kc:
+                mock_kc.get_social_login_url = real_service.get_social_login_url
+
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.get(f"/auth/keycloak/social/{provider}")
+                    assert response.status_code == 200
+                    data = response.json()
+                    assert "auth_url" in data
+                    assert "state" in data
+                    assert f"kc_idp_hint={provider}" in data["auth_url"]
+                    assert "openid-connect/auth" in data["auth_url"]
+
+    def test_social_login_url_contains_kc_idp_hint(self):
+        from app.services.keycloak_service import KeycloakService
+
+        service = KeycloakService()
+        url = service.get_social_login_url("google", "http://localhost/callback", "state123")
+
+        assert "kc_idp_hint=google" in url
+        assert "openid-connect/auth" in url
+        assert "state=state123" in url
+        assert "response_type=code" in url
+

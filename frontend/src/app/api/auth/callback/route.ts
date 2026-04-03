@@ -26,7 +26,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(new URL("/login?error=no_code", request.url));
   }
 
-  const redirectUri = `${new URL(request.url).origin}/api/auth/callback`;
+  // Behind nginx (SSL termination), request.url has http:// even in production.
+  // Use X-Forwarded-Proto + Host headers to reconstruct the correct public origin.
+  const proto = (request.headers.get("x-forwarded-proto") ?? "").split(",")[0].trim() || new URL(request.url).protocol.slice(0, -1);
+  const host = request.headers.get("host") || new URL(request.url).host;
+  const redirectUri = `${proto}://${host}/api/auth/callback`;
 
   try {
     const response = await fetch(`${BACKEND_URL}/auth/keycloak/callback`, {

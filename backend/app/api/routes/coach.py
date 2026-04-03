@@ -44,17 +44,25 @@ async def _stream_with_own_session(
     message: str, user_id: str, extra_context: str | None = None
 ) -> AsyncGenerator[str, None]:
     from app.services.langchain_agent import LangChainCoachAgent
+    from loguru import logger
 
     async with async_session() as db:
-        agent = LangChainCoachAgent()
-        full_message = message
-        if extra_context:
-            full_message = (
-                f"{message}\n\n[Zusatz-Kontext für den Coach]:\n{extra_context}"
-            )
-        async for chunk in agent.stream(full_message, user_id, db):
-            yield chunk
-        await db.commit()
+        try:
+            agent = LangChainCoachAgent()
+            full_message = message
+            if extra_context:
+                full_message = (
+                    f"{message}\n\n[Zusatz-Kontext für den Coach]:\n{extra_context}"
+                )
+            async for chunk in agent.stream(full_message, user_id, db):
+                yield chunk
+            await db.commit()
+        except Exception as e:
+            try:
+                await db.rollback()
+            except Exception as rb_err:
+                logger.warning(f"SSE rollback failed | user={user_id} | error={rb_err}")
+            raise
 
 
 @router.post("/chat")
@@ -78,14 +86,21 @@ async def chat(
                 detail=f"Gast-Limit erreicht ({settings.guest_max_messages} Nachrichten). Bitte registrieren für mehr.",
             )
         # Atomic increment für Race Condition Prevention
-        await db.execute(
+        result = await db.execute(
             update(GuestSession)
-            .where(GuestSession.id == current.id)
+            .where(
+                GuestSession.id == current.id,
+                GuestSession.message_count < settings.guest_max_messages,
+            )
             .values(message_count=GuestSession.message_count + 1)
         )
         await db.commit()
-        # Lokalen State aktualisieren für Response
-        current.message_count += 1
+        if result.rowcount == 0:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Gast-Limit erreicht ({settings.guest_max_messages} Nachrichten). Bitte registrieren für mehr.",
+            )
+        new_count = current.message_count + 1
         user_id = f"guest:{current.id}"
     else:
         user_id = str(current.id)
@@ -104,7 +119,7 @@ async def chat(
             **(
                 {
                     "X-Guest-Messages-Remaining": str(
-                        settings.guest_max_messages - current.message_count
+                        settings.guest_max_messages - new_count
                     )
                 }
                 if is_guest

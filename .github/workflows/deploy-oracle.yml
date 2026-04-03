@@ -1,0 +1,47 @@
+name: Deploy Backend → Oracle Cloud
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "docker-compose.backend.yml"
+      - "nginx/**"
+      - "keycloak/**"
+      - "postgres/**"
+      - ".github/workflows/deploy-oracle.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Oracle Cloud Production Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          port: ${{ secrets.ORACLE_SSH_PORT || 22 }}
+          script: |
+            set -e
+            cd ~/trainiq
+
+            # Pull latest code
+            git pull origin main
+
+            # Rebuild changed images and restart backend services
+            docker compose -f docker-compose.backend.yml build --pull backend scheduler worker
+
+            docker compose -f docker-compose.backend.yml up -d \
+              --remove-orphans \
+              migrate backend scheduler worker nginx certbot
+
+            # Wait for backend health check
+            sleep 15
+            docker compose -f docker-compose.backend.yml ps
+
+            # Remove dangling images older than 24 h to free disk space
+            docker image prune -f --filter "until=24h"

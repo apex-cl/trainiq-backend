@@ -46,10 +46,14 @@ jobs:
           JWT_SECRET: test-secret-ci-only
           DEV_MODE: "true"
           DEMO_USER_ID: "00000000-0000-0000-0000-000000000001"
-          GEMINI_API_KEY: ""
+          LLM_API_KEY: ""
+          LLM_BASE_URL: "https://api.openai.com/v1"
           CLOUDINARY_CLOUD_NAME: ""
           CLOUDINARY_API_KEY: ""
           CLOUDINARY_API_SECRET: ""
+          STRAVA_CLIENT_ID: ""
+          STRAVA_CLIENT_SECRET: ""
+          FRONTEND_URL: "http://localhost:3000"
         run: python -m pytest tests/ -v --tb=short
 
   frontend-build:
@@ -72,11 +76,19 @@ jobs:
 
       - name: Type check
         working-directory: frontend
-        run: npx tsc --noEmit
+        run: node_modules/.bin/tsc --noEmit
+
+      - name: Unit tests
+        working-directory: frontend
+        run: node_modules/.bin/vitest run
 
       - name: Build
         working-directory: frontend
         env:
           NEXT_TELEMETRY_DISABLED: 1
-          BACKEND_URL: http://backend:8000
+          # Simulate Vercel production environment
+          NEXT_PUBLIC_API_URL: https://api.trainiq.com/api
+          BACKEND_URL: https://api.trainiq.com
+          NEXT_PUBLIC_VAPID_KEY: ""
+          NEXT_PUBLIC_SENTRY_DSN: ""
         run: npm run build

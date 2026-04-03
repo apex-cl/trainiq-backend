@@ -25,7 +25,8 @@ export default function AuthCallbackPage() {
         setAuth(data.access_token, data.user);
         router.replace("/dashboard");
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error("[TrainIQ] OAuth callback failed:", err);
         setError("Anmeldung fehlgeschlagen. Bitte erneut versuchen.");
       });
   }, [searchParams, setAuth, router]);

@@ -101,29 +101,6 @@ async def enqueue_training_plan(
     }
 
 
-@router.post("/sync-strava")
-@limiter.limit("5/minute")
-async def enqueue_strava_sync(
-    request: Request,
-    current_user: User = Depends(get_current_user),
-):
-    """Enqueut eine Strava-Sync im Hintergrund."""
-    try:
-        redis = await _get_arq_pool()
-        job = await redis.enqueue_job(
-            "sync_strava_activities",
-            str(current_user.id),
-        )
-    except (asyncio.TimeoutError, Exception) as exc:
-        raise HTTPException(status_code=503, detail="Task-Queue nicht verfügbar") from exc
-    task_id = f"strava_sync:{current_user.id}"
-    return {
-        "task_id": task_id,
-        "job_id": job.job_id,
-        "status": "enqueued",
-    }
-
-
 @router.get("/status/{task_id}")
 async def task_status_sse(
     task_id: str,
@@ -133,10 +110,9 @@ async def task_status_sse(
     SSE-Stream für Task-Status-Updates.
     Streamt Events bis der Task abgeschlossen ist.
     """
-    # Ownership-Check: task_id beginnt immer mit plan_gen:<user_id>: oder strava_sync:<user_id>
+    # Ownership-Check: task_id beginnt immer mit plan_gen:<user_id>:
     user_prefix = str(current_user.id)
-    if not (task_id.startswith(f"plan_gen:{user_prefix}:") or
-            task_id.startswith(f"strava_sync:{user_prefix}")):
+    if not task_id.startswith(f"plan_gen:{user_prefix}:"):
         raise HTTPException(status_code=403, detail="Kein Zugriff auf diesen Task")
 
     return StreamingResponse(
@@ -152,13 +128,9 @@ async def task_status_sse(
 
 async def _stream_task_status(task_id: str) -> AsyncGenerator[str, None]:
     """SSE-Stream für Task-Status via Redis Pub/Sub."""
-    import redis.asyncio as aioredis
+    from app.core.redis import get_redis
 
-    redis_client = aioredis.from_url(
-        settings.redis_url,
-        socket_connect_timeout=3,
-        socket_timeout=3,
-    )
+    redis_client = get_redis()
     pubsub = redis_client.pubsub()
 
     try:
@@ -187,7 +159,6 @@ async def _stream_task_status(task_id: str) -> AsyncGenerator[str, None]:
     finally:
         await pubsub.unsubscribe(f"task:{task_id}")
         await pubsub.aclose()
-        await redis_client.aclose()
 
 
 # ─── Watch Echtzeit-Stream ──────────────────────────────────────────────────
@@ -203,7 +174,7 @@ async def watch_events_sse(
     Persistenter SSE-Stream für Uhr-Sync-Events.
     Akzeptiert Auth-Token als Bearer-Header ODER als ?token= Query-Param
     (EventSource API im Browser unterstützt keine Custom-Headers).
-    Sobald Strava/Garmin eine Aktivität synchronisiert, sendet der Server ein Event
+    Sobald eine Aktivität synchronisiert wird, sendet der Server ein Event
     und das Frontend lädt Metriken + Trainingsplan automatisch neu.
     """
     from app.core.security import verify_token as _verify_token
@@ -255,13 +226,9 @@ async def watch_events_sse(
 
 async def _stream_watch_events(user_id: str) -> AsyncGenerator[str, None]:
     """Lauscht auf watch_events:{user_id} Channel und streamt Events ans Frontend."""
-    import redis.asyncio as aioredis
+    from app.core.redis import get_redis
 
-    redis_client = aioredis.from_url(
-        settings.redis_url,
-        socket_connect_timeout=3,
-        socket_timeout=3,
-    )
+    redis_client = get_redis()
     pubsub = redis_client.pubsub()
 
     try:
@@ -292,4 +259,3 @@ async def _stream_watch_events(user_id: str) -> AsyncGenerator[str, None]:
     finally:
         await pubsub.unsubscribe(f"watch_events:{user_id}")
         await pubsub.aclose()
-        await redis_client.aclose()

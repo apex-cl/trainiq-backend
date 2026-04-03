@@ -34,7 +34,7 @@ WELCOME_TEMPLATE = """
         <ul style="font-size: 15px; color: #555; line-height: 1.8;">
             <li>KI-Coach für personalisierte Trainingsberatung</li>
             <li>Automatische Trainingsplan-Generierung</li>
-            <li>Strava-Synchronisation</li>
+            <li>Uhren-Synchronisation (Garmin, Polar, Wahoo u.v.m.)</li>
             <li>Gesundheitsmetriken & Recovery-Score</li>
         </ul>
         <div style="text-align: center; margin: 30px 0;">
@@ -209,15 +209,6 @@ class EmailService:
         """
         from app.models.ai_memory import PasswordResetToken
 
-        token = secrets.token_urlsafe(48)
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
-
-        reset_token = PasswordResetToken(
-            user_id=None,  # Wird über Token zugeordnet
-            token=token,
-            expires_at=expires_at,
-        )
-
         # User-ID holen
         from app.models.user import User
 
@@ -226,7 +217,14 @@ class EmailService:
         if not user:
             raise ValueError("User not found")
 
-        reset_token.user_id = user.id
+        token = secrets.token_urlsafe(48)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        reset_token = PasswordResetToken(
+            user_id=user.id,
+            token=token,
+            expires_at=expires_at,
+        )
         db.add(reset_token)
         await db.flush()
 

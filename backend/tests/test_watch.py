@@ -47,11 +47,3 @@ async def test_watch_manual_invalid_hrv(client, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_strava_connect_requires_config(client, auth_headers):
-    """Strava connect returns 503 when no client ID configured."""
-    resp = await client.get("/watch/strava/connect", headers=auth_headers)
-    # Either redirects (302) or returns unavailable (503) — both valid
-    assert resp.status_code in [200, 302, 503]

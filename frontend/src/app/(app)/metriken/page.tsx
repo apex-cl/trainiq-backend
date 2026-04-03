@@ -1,9 +1,11 @@
 "use client";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import { useQueryClient } from "@tanstack/react-query";
 import { useMetrics } from "@/hooks/useMetrics";
 import api from "@/lib/api";
+import { useWatch } from "@/hooks/useWatch";
+import Link from "next/link";
 
 const DAYS = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
 
@@ -20,7 +22,13 @@ export default function MetrikenPage() {
   const qc = useQueryClient();
   type MetricDay = { hrv: number; resting_hr: number; sleep_duration_min: number; stress_score: number; spo2: number; steps: number; vo2_max: number; date: string };
   const data: MetricDay[] = (week as MetricDay[]) ?? [];
-  const hasValues = data.some((d) => (d.hrv ?? 0) > 0 || (d.sleep_duration_min ?? 0) > 0);
+  const hasValues = data.some((d) =>
+    (d.hrv ?? 0) > 0 || (d.sleep_duration_min ?? 0) > 0 ||
+    (d.resting_hr ?? 0) > 0 || (d.stress_score ?? 0) > 0 ||
+    (d.steps ?? 0) > 0 || (d.vo2_max ?? 0) > 0
+  );
+
+  const todayMetric = today as MetricDay | undefined;
 
   const [fatigue, setFatigue] = useState(5);
   const [mood, setMood] = useState(7);
@@ -39,7 +47,9 @@ export default function MetrikenPage() {
   const [manualSaved, setManualSaved] = useState(false);
   const [manualError, setManualError] = useState("");
 
-  const chartData = data.map((d: any) => ({
+  const [wellbeingError, setWellbeingError] = useState(false);
+
+  const chartData = useMemo(() => data.map((d) => ({
     day: DAYS[new Date(d.date + "T00:00:00").getDay()],
     hrv: d.hrv ?? 0,
     hr: d.resting_hr ?? 0,
@@ -48,17 +58,24 @@ export default function MetrikenPage() {
     spo2: d.spo2 ?? 0,
     steps: d.steps ?? 0,
     vo2: d.vo2_max ?? 0,
-  }));
+  })), [data]);
 
-  const avgHrv = data.length > 0
-    ? Math.round(data.reduce((a: number, d: { hrv: number }) => a + (d.hrv ?? 0), 0) / data.length)
-    : 0;
-  const avgSleep = data.length > 0
-    ? (data.reduce((a: number, d: { sleep_duration_min: number }) => a + (d.sleep_duration_min ?? 0), 0) / data.length / 60).toFixed(1)
-    : "0";
-  const latestVo2 = (today as any)?.vo2_max ?? (data.length > 0 ? data.find((d: any) => d.vo2_max != null)?.vo2_max ?? null : null);
-
-  const [wellbeingError, setWellbeingError] = useState(false);
+  const avgHrv = useMemo(() => {
+    const valid = data.filter((d) => (d.hrv ?? 0) > 0);
+    return valid.length > 0
+      ? Math.round(valid.reduce((a, d) => a + d.hrv, 0) / valid.length)
+      : 0;
+  }, [data]);
+  const avgSleep = useMemo(() => {
+    const valid = data.filter((d) => (d.sleep_duration_min ?? 0) > 0);
+    return valid.length > 0
+      ? (valid.reduce((a, d) => a + d.sleep_duration_min, 0) / valid.length / 60).toFixed(1)
+      : "0";
+  }, [data]);
+  const latestVo2 = useMemo(() =>
+    todayMetric?.vo2_max ?? (data.length > 0 ? data.find((d) => d.vo2_max != null)?.vo2_max ?? null : null),
+    [todayMetric, data]
+  );
 
   const submitWellbeing = async () => {
     setWellbeingError(false);
@@ -168,14 +185,14 @@ export default function MetrikenPage() {
     <div className="flex flex-col">
 
       {/* Header */}
-      <div className="px-5 pt-5 pb-4 border-b border-border">
+      <div className="px-5 pt-5 pb-4 border-b border-border flex justify-between items-center">
         <span className="font-pixel text-blue text-xl">METRIKEN</span>
       </div>
 
       {/* Zusammenfassung */}
       <div className="grid grid-cols-3 border-b border-border">
         {[
-          { label: "HRV Ø",   value: today?.hrv ?? avgHrv,  unit: "ms" },
+          { label: "HRV Ø",   value: todayMetric?.hrv ?? avgHrv,  unit: "ms" },
           { label: "Schlaf",  value: avgSleep,                unit: "h / Ø" },
           { label: "Score",   value: recovery?.score ?? "—",  unit: "/ 100" },
         ].map((m, i) => (
@@ -190,8 +207,8 @@ export default function MetrikenPage() {
       {/* Zweite Reihe: Ruhepuls / SpO2 / VO2 max */}
       <div className="grid grid-cols-3 border-b border-border">
         {[
-          { label: "Ruhepuls",  value: (today as any)?.resting_hr ?? "—", unit: "bpm" },
-          { label: "SpO₂",      value: (today as any)?.spo2 ?? "—",        unit: "%" },
+          { label: "Ruhepuls",  value: todayMetric?.resting_hr ?? "—", unit: "bpm" },
+          { label: "SpO₂",      value: todayMetric?.spo2 ?? "—",        unit: "%" },
           { label: "VO₂ max",   value: latestVo2 != null ? latestVo2.toFixed(1) : "—", unit: "ml/kg/min" },
         ].map((m, i) => (
           <div key={i} className={`px-4 py-4 ${i < 2 ? "border-r border-border" : ""}`}>
@@ -205,16 +222,16 @@ export default function MetrikenPage() {
       {/* HRV Chart */}
       <div className="px-5 py-5 border-b border-border">
         <div className="flex justify-between items-center mb-4">
-          <p className="text-xs tracking-widest uppercase text-textDim font-sans">HRV — 7 Tage</p>
-          <p className="font-pixel text-blue" style={{ fontSize: 16 }}>{today?.hrv ?? avgHrv}ms</p>
+          <p className="text-xs tracking-widest uppercase text-textDim font-sans">HRV — 30 Tage</p>
+          <p className="font-pixel text-blue" style={{ fontSize: 16 }}>{todayMetric?.hrv ?? avgHrv}ms</p>
         </div>
         {hasValues ? (
           <div className="border border-border overflow-hidden">
-            <ResponsiveContainer width="100%" height={80}>
-              <LineChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: -20 }}>
-                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                <Tooltip content={<CustomTooltip />} />
+            <ResponsiveContainer width="100%" height={120}>
+              <LineChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} interval={0} />
+                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} tickCount={3} domain={["auto", "auto"]} width={28} />
+                <Tooltip content={<CustomTooltip unit="ms" />} />
                 <Line type="monotone" dataKey="hrv" stroke="#2563EB" strokeWidth={1.5} dot={false} activeDot={{ r: 3, fill: "#2563EB" }} />
               </LineChart>
             </ResponsiveContainer>
@@ -225,16 +242,16 @@ export default function MetrikenPage() {
       {/* Schlaf Chart */}
       <div className="px-5 py-5 border-b border-border">
         <div className="flex justify-between items-center mb-4">
-          <p className="text-xs tracking-widest uppercase text-textDim font-sans">Schlaf — 7 Tage</p>
-          <p className="font-pixel text-textMain" style={{ fontSize: 16 }}>{today?.sleep_duration_min ? (today.sleep_duration_min / 60).toFixed(1) : avgSleep}h</p>
+          <p className="text-xs tracking-widest uppercase text-textDim font-sans">Schlaf — 30 Tage</p>
+          <p className="font-pixel text-textMain" style={{ fontSize: 16 }}>{todayMetric?.sleep_duration_min ? (todayMetric.sleep_duration_min / 60).toFixed(1) : avgSleep}h</p>
         </div>
         {hasValues ? (
           <div className="border border-border overflow-hidden">
-            <ResponsiveContainer width="100%" height={80}>
-              <BarChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: -20 }}>
-                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                <Tooltip content={<CustomTooltip />} />
+            <ResponsiveContainer width="100%" height={120}>
+              <BarChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} interval={0} />
+                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} tickCount={3} domain={[0, "auto"]} width={28} />
+                <Tooltip content={<CustomTooltip unit="h" />} />
                 <Bar dataKey="sleep" fill="#CCCCCC" radius={0} maxBarSize={20} minPointSize={2} />
               </BarChart>
             </ResponsiveContainer>
@@ -245,15 +262,15 @@ export default function MetrikenPage() {
       {/* Stress Chart */}
       <div className="px-5 py-5 border-b border-border">
         <div className="flex justify-between items-center mb-4">
-          <p className="text-xs tracking-widest uppercase text-textDim font-sans">Stresslevel — 7 Tage</p>
-          <p className="font-pixel text-textMain" style={{ fontSize: 16 }}>{today?.stress_score ?? "—"}</p>
+          <p className="text-xs tracking-widest uppercase text-textDim font-sans">Stresslevel — 30 Tage</p>
+          <p className="font-pixel text-textMain" style={{ fontSize: 16 }}>{todayMetric?.stress_score ?? "—"}</p>
         </div>
         {hasValues ? (
           <div className="border border-border overflow-hidden">
-            <ResponsiveContainer width="100%" height={80}>
-              <LineChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: -20 }}>
-                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} />
+            <ResponsiveContainer width="100%" height={120}>
+              <LineChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} interval={0} />
+                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} tickCount={3} domain={[0, 100]} width={28} />
                 <Tooltip content={<CustomTooltip />} />
                 <Line type="monotone" dataKey="stress" stroke="#CCCCCC" strokeWidth={1.5} dot={false} activeDot={{ r: 3, fill: "#888888" }} />
               </LineChart>
@@ -265,16 +282,16 @@ export default function MetrikenPage() {
       {/* Ruhepuls Chart */}
       <div className="px-5 py-5 border-b border-border">
         <div className="flex justify-between items-center mb-4">
-          <p className="text-xs tracking-widest uppercase text-textDim font-sans">Ruhepuls — 7 Tage</p>
-          <p className="font-pixel text-textMain" style={{ fontSize: 16 }}>{today?.resting_hr ?? "—"}bpm</p>
+          <p className="text-xs tracking-widest uppercase text-textDim font-sans">Ruhepuls — 30 Tage</p>
+          <p className="font-pixel text-textMain" style={{ fontSize: 16 }}>{todayMetric?.resting_hr ?? "—"}bpm</p>
         </div>
         {hasValues ? (
           <div className="border border-border overflow-hidden">
-            <ResponsiveContainer width="100%" height={80}>
-              <LineChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: -20 }}>
-                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                <Tooltip content={<CustomTooltip />} />
+            <ResponsiveContainer width="100%" height={120}>
+              <LineChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} interval={0} />
+                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} tickCount={3} domain={["auto", "auto"]} width={28} />
+                <Tooltip content={<CustomTooltip unit="bpm" />} />
                 <Line type="monotone" dataKey="hr" stroke="#2563EB" strokeWidth={1.5} dot={false} activeDot={{ r: 3, fill: "#2563EB" }} />
               </LineChart>
             </ResponsiveContainer>
@@ -285,17 +302,17 @@ export default function MetrikenPage() {
       {/* VO2 max Chart */}
       <div className="px-5 py-5 border-b border-border">
         <div className="flex justify-between items-center mb-4">
-          <p className="text-xs tracking-widest uppercase text-textDim font-sans">VO₂ max — 7 Tage</p>
+          <p className="text-xs tracking-widest uppercase text-textDim font-sans">VO₂ max — 30 Tage</p>
           <p className="font-pixel text-textMain" style={{ fontSize: 16 }}>
             {latestVo2 != null ? `${latestVo2.toFixed(1)} ml/kg/min` : "—"}
           </p>
         </div>
         {hasValues && chartData.some((d) => d.vo2 > 0) ? (
           <div className="border border-border overflow-hidden">
-            <ResponsiveContainer width="100%" height={80}>
-              <LineChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: -20 }}>
-                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} />
-                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} domain={["auto", "auto"]} />
+            <ResponsiveContainer width="100%" height={120}>
+              <LineChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                <XAxis dataKey="day" tick={AXIS_TICK} axisLine={false} tickLine={false} interval={0} />
+                <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} tickCount={3} domain={["auto", "auto"]} width={28} />
                 <Tooltip content={<CustomTooltip unit=" ml/kg/min" />} />
                 <Line type="monotone" dataKey="vo2" stroke="#16A34A" strokeWidth={1.5} dot={{ r: 3, fill: "#16A34A" }} activeDot={{ r: 4, fill: "#16A34A" }} />
               </LineChart>
@@ -484,11 +501,12 @@ export default function MetrikenPage() {
                 <input
                   type="range" min={1} max={10} value={val}
                   onChange={(e) => set(Number(e.target.value))}
-                  className="w-full accent-blue h-[3px]"
+                  className="w-full metric-range"
+                  style={{ "--range-fill": `${(val - 1) / 9 * 100}%` } as React.CSSProperties}
                 />
                 <div className="flex justify-between mt-1">
-                  <span className="text-xs font-sans text-textDim">Niedrig</span>
-                  <span className="text-xs font-sans text-textDim">Hoch</span>
+                  <span className="text-xs font-pixel text-textDim tracking-widest">Niedrig</span>
+                  <span className="text-xs font-pixel text-textDim tracking-widest">Hoch</span>
                 </div>
               </div>
             ))}

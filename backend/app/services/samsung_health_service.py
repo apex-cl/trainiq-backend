@@ -17,7 +17,7 @@ class SamsungHealthService:
     # Samsung Account OAuth2
     AUTH_URL = "https://account.samsung.com/accounts/v1/oauth2/authorize"
     TOKEN_URL = "https://account.samsung.com/accounts/v1/oauth2/token"
-    API_BASE = "https://shealth.samsung.com/v1"
+    API_BASE = "https://shealth.samsung.com/shealth/api/v1"
 
     # Scopes: https://developer.samsung.com/health/server/scopes.html
     SCOPES = [

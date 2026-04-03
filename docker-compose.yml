@@ -80,7 +80,7 @@ services:
   migrate:
     build: ./backend
     pull_policy: build
-    command: sh -c "alembic downgrade base && alembic upgrade head"
+    command: alembic upgrade head
     environment:
       - DATABASE_URL=${DATABASE_URL}
     depends_on:
@@ -142,10 +142,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    build:
-      context: ./frontend
-      target: base
-    pull_policy: build
+    image: node:20-alpine
     ports:
       - "3000:3000"
     depends_on:

@@ -11,7 +11,7 @@ class AIMemory(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE")
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     fact: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -41,19 +41,6 @@ class PasswordResetToken(Base):
         DateTime(timezone=True), nullable=False
     )
     used: Mapped[bool] = mapped_column(default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-
-
-class StravaWebhookSubscription(Base):
-    __tablename__ = "strava_webhook_subscriptions"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    strava_subscription_id: Mapped[int | None] = mapped_column(
-        unique=True, nullable=True
-    )
-    callback_url: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

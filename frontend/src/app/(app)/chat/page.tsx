@@ -38,7 +38,7 @@ function formatTime(iso: string): string {
 
 export default function ChatPage() {
   const router = useRouter();
-  const { messages, loading, historyLoading, isError, sendMessage, sendImage, guestLimits } = useCoach();
+  const { messages, loading, historyLoading, isError, sendMessage, sendImage, guestLimits, clearMessages } = useCoach();
   const [input, setInput] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
@@ -59,7 +59,7 @@ export default function ChatPage() {
   }, [guestLimits]);
 
   const handleSend = () => {
-    if (!input.trim() || loading || input.length > 1000) return;
+    if (!input.trim() || loading || input.length > 2000) return;
     if (guestLimits.isGuest && guestLimits.messagesRemaining === 0) {
       setShowUpgradePrompt(true);
       return;
@@ -74,7 +74,8 @@ export default function ChatPage() {
     setDeleteError(false);
     try {
       await api.delete("/coach/history");
-      window.location.reload();
+      clearMessages();
+      setShowDeleteConfirm(false);
     } catch {
       setDeleteError(true);
       setShowDeleteConfirm(false);
@@ -255,9 +256,9 @@ export default function ChatPage() {
               className="flex-1 bg-transparent text-sm font-sans text-textMain placeholder-textDim outline-none disabled:opacity-50"
             />
             <span className="cursor-blink text-blue font-mono text-sm">_</span>
-            {input.length > 900 && (
+            {input.length > 1800 && (
               <span className="text-[10px] font-sans text-danger shrink-0">
-                {1000 - input.length}
+                {2000 - input.length}
               </span>
             )}
           </div>

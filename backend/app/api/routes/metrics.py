@@ -15,51 +15,7 @@ from app.core.config import settings
 router = APIRouter()
 
 # ─── Redis Cache Helpers ──────────────────────────────────────────────────────
-# Singleton-Pool: einmalig pro Worker-Prozess – keine TCP-Verbindung pro Aufruf
-
-_redis_client = None  # redis.asyncio.Redis
-
-
-def _get_redis():
-    global _redis_client
-    if _redis_client is None:
-        try:
-            import redis.asyncio as aioredis
-            _redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
-        except Exception:
-            return None
-    return _redis_client
-
-
-async def _cache_get(key: str) -> dict | None:
-    try:
-        r = _get_redis()
-        if r is None:
-            return None
-        raw = await r.get(key)
-        return json.loads(raw) if raw else None
-    except Exception:
-        return None
-
-
-async def _cache_set(key: str, value: dict, ttl: int) -> None:
-    try:
-        r = _get_redis()
-        if r is None:
-            return
-        await r.set(key, json.dumps(value), ex=ttl)
-    except Exception:
-        pass
-
-
-async def _cache_del(key: str) -> None:
-    try:
-        r = _get_redis()
-        if r is None:
-            return
-        await r.delete(key)
-    except Exception:
-        pass
+from app.core.redis import cache_get as _cache_get, cache_set as _cache_set, cache_del as _cache_del
 
 
 class WellbeingRequest(BaseModel):
@@ -137,7 +93,7 @@ async def get_today(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return today's health metrics."""
+    """Return today's health metrics, falling back to the most recent available entry."""
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -149,9 +105,41 @@ async def get_today(
             HealthMetric.recorded_at >= today_start,
         )
         .order_by(HealthMetric.recorded_at.desc())
-        .limit(1)
+        .limit(5)
     )
-    metric = result.scalars().first()
+    metrics_today = result.scalars().all()
+
+    # Pick the first entry that has at least one real metric value
+    metric = None
+    for m in metrics_today:
+        if any([m.hrv, m.resting_hr, m.sleep_duration_min, m.stress_score, m.steps, m.vo2_max, m.spo2]):
+            metric = m
+            break
+
+    # Fall back to most recent garmin/watch entry in the last 90 days
+    if not metric:
+        from sqlalchemy import or_
+        ninety_days_ago = datetime.now(timezone.utc) - timedelta(days=90)
+        fallback_result = await db.execute(
+            select(HealthMetric)
+            .where(
+                HealthMetric.user_id == current_user.id,
+                HealthMetric.recorded_at >= ninety_days_ago,
+                HealthMetric.source != "no_data",
+                or_(
+                    HealthMetric.resting_hr.isnot(None),
+                    HealthMetric.hrv.isnot(None),
+                    HealthMetric.sleep_duration_min.isnot(None),
+                    HealthMetric.stress_score.isnot(None),
+                    HealthMetric.vo2_max.isnot(None),
+                    HealthMetric.spo2.isnot(None),
+                    HealthMetric.steps.isnot(None),
+                ),
+            )
+            .order_by(HealthMetric.recorded_at.desc())
+            .limit(1)
+        )
+        metric = fallback_result.scalars().first()
 
     if not metric:
         return {
@@ -185,16 +173,16 @@ async def get_week(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return health metrics for the last 7 days, newest entry per day."""
-    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    """Return health metrics for the last 30 days, newest entry per day."""
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
 
-    # Fetch all records for the last 7 days, then group by date in Python.
+    # Fetch all records for the last 30 days, then group by date in Python.
     # This is DB-agnostic (works with both PostgreSQL and SQLite for tests).
     result = await db.execute(
         select(HealthMetric)
         .where(
             HealthMetric.user_id == current_user.id,
-            HealthMetric.recorded_at >= seven_days_ago,
+            HealthMetric.recorded_at >= thirty_days_ago,
         )
         .order_by(HealthMetric.recorded_at.desc())
     )
@@ -203,6 +191,9 @@ async def get_week(
     # Keep only the latest entry per calendar day
     seen_days: dict = {}
     for m in metrics:
+        # Skip entries where all metric fields are null (empty sync placeholders)
+        if not any([m.hrv, m.resting_hr, m.sleep_duration_min, m.stress_score, m.vo2_max, m.spo2, m.steps]):
+            continue
         day = m.recorded_at.date() if hasattr(m.recorded_at, "date") else m.recorded_at
         if isinstance(day, str):
             day = date.fromisoformat(day[:10])
@@ -240,7 +231,7 @@ async def get_recovery(
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
+    ninety_days_ago = datetime.now(timezone.utc) - timedelta(days=90)
 
     # Run both queries in parallel
     today_q = db.execute(
@@ -256,7 +247,7 @@ async def get_recovery(
         select(HealthMetric)
         .where(
             HealthMetric.user_id == current_user.id,
-            HealthMetric.recorded_at >= fourteen_days_ago,
+            HealthMetric.recorded_at >= ninety_days_ago,
         )
         .order_by(HealthMetric.recorded_at.desc())
         .limit(28)
@@ -265,10 +256,17 @@ async def get_recovery(
 
     metric = today_result.scalars().first()
 
+    # Skip today's entry if all metric fields are null (empty sync placeholder)
+    if metric and not any([metric.hrv, metric.resting_hr, metric.sleep_duration_min, metric.stress_score, metric.vo2_max, metric.spo2, metric.steps]):
+        metric = None
+
     if not metric:
-        # Fallback: last available metric (already in baseline set)
+        # Fallback: last available metric with real data from baseline set
         all_baseline = baseline_result.scalars().all()
-        metric = all_baseline[0] if all_baseline else None
+        for m in all_baseline:
+            if any([m.hrv, m.resting_hr, m.sleep_duration_min, m.stress_score, m.vo2_max, m.spo2, m.steps]):
+                metric = m
+                break
         baseline_metrics = all_baseline
     else:
         baseline_metrics = baseline_result.scalars().all()
@@ -304,6 +302,17 @@ async def get_recovery(
 
     response = scorer.calculate_recovery_score(metric_dict, user_baseline=user_baseline)
     response["baseline"] = user_baseline
+
+    # Tell the frontend which fields actually had real data (not just fallback defaults)
+    has_hrv        = metric.hrv is not None
+    has_resting_hr = metric.resting_hr is not None
+    has_sleep      = metric.sleep_duration_min is not None
+    has_stress     = metric.stress_score is not None
+    response["has_hrv"]        = has_hrv
+    response["has_resting_hr"] = has_resting_hr
+    response["has_sleep"]      = has_sleep
+    response["has_stress"]     = has_stress
+    response["data_available"] = any([has_hrv, has_resting_hr, has_sleep, has_stress])
 
     # Cache for 5 minutes — recovery changes at most when new metrics arrive
     await _cache_set(cache_key, response, ttl=300)

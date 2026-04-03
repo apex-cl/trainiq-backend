@@ -96,3 +96,5 @@ export interface WatchConnection {
   last_synced_at: string | null;
   is_active: boolean;
 }
+
+

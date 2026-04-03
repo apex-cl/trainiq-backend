@@ -6,6 +6,7 @@ Tasks publish status updates to Redis pub/sub for SSE consumers.
 """
 
 import json
+import uuid as uuid_module
 from datetime import date, timedelta, datetime, timezone
 from arq import cron
 from loguru import logger
@@ -50,11 +51,17 @@ async def generate_training_plan(ctx: dict, user_id: str, week_start: str):
             await _publish_status(redis, task_id, "failed", {"error": "Invalid week_start format"})
             return
 
+        try:
+            user_uuid = uuid_module.UUID(user_id)
+        except ValueError:
+            await _publish_status(redis, task_id, "failed", {"error": "Invalid user_id format"})
+            return
+
         async with async_session() as db:
             # Prüfen ob Plan bereits existiert
             result = await db.execute(
                 select(TrainingPlan).where(
-                    TrainingPlan.user_id == user_id,
+                    TrainingPlan.user_id == user_uuid,
                     TrainingPlan.date >= week_date,
                     TrainingPlan.date < week_date + timedelta(days=7),
                 )
@@ -78,200 +85,6 @@ async def generate_training_plan(ctx: dict, user_id: str, week_start: str):
     except Exception as e:
         await _publish_status(redis, task_id, "failed", {"error": str(e)})
         logger.error(f"Background plan generation failed | user={user_id} | error={e}")
-
-
-async def sync_strava_activities(ctx: dict, user_id: str):
-    """
-    Synchronisiert Strava-Aktivitäten im Hintergrund.
-    """
-    redis = ctx["redis"]
-    task_id = f"strava_sync:{user_id}"
-
-    await _publish_status(redis, task_id, "started")
-    logger.info(f"Background Strava sync started | user={user_id}")
-
-    try:
-        from app.services.strava_service import StravaService
-        from app.models.watch import WatchConnection
-        from app.models.training import TrainingPlan
-        from sqlalchemy import select
-
-        strava = StravaService()
-        synced_count = 0
-
-        async with async_session() as db:
-            result = await db.execute(
-                select(WatchConnection).where(
-                    WatchConnection.user_id == user_id,
-                    WatchConnection.provider == "strava",
-                    WatchConnection.is_active == True,
-                )
-            )
-            strava_conn = result.scalar_one_or_none()
-
-            if not strava_conn:
-                await _publish_status(
-                    redis, task_id, "skipped", {"reason": "Keine Strava-Verbindung"}
-                )
-                return
-
-            try:
-                activities = await strava.get_recent_activities(
-                    strava_conn.access_token, limit=10
-                )
-            except Exception:
-                new_tokens = await strava.refresh_token(strava_conn.refresh_token)
-                strava_conn.access_token = new_tokens["access_token"]
-                strava_conn.refresh_token = new_tokens.get(
-                    "refresh_token", strava_conn.refresh_token
-                )
-                activities = await strava.get_recent_activities(
-                    strava_conn.access_token, limit=10
-                )
-
-            for activity in activities:
-                update = strava.activity_to_training_plan_update(activity)
-                activity_date = date.fromisoformat(update["date"])
-
-                plan_result = await db.execute(
-                    select(TrainingPlan).where(
-                        TrainingPlan.user_id == user_id,
-                        TrainingPlan.date == activity_date,
-                    )
-                )
-                plan = plan_result.scalar_one_or_none()
-                if plan and plan.status != "completed":
-                    plan.status = "completed"
-                    if update.get("avg_hr"):
-                        plan.target_hr_min = update["avg_hr"] - 10
-                        plan.target_hr_max = update["avg_hr"] + 10
-                    synced_count += 1
-
-            strava_conn.last_synced_at = datetime.now(timezone.utc)
-            await db.commit()
-
-        await _publish_status(redis, task_id, "completed", {"synced": synced_count})
-        logger.info(
-            f"Background Strava sync completed | user={user_id} | synced={synced_count}"
-        )
-
-    except Exception as e:
-        await _publish_status(redis, task_id, "failed", {"error": str(e)})
-        logger.error(f"Background Strava sync failed | user={user_id} | error={e}")
-
-
-async def process_strava_webhook_event(
-    ctx: dict, user_id: str, object_id: int, aspect_type: str, event_time: int
-):
-    """
-    Verarbeitet ein Strava Webhook Event im Hintergrund.
-    """
-    redis = ctx["redis"]
-    task_id = f"strava_webhook:{user_id}:{object_id}"
-
-    await _publish_status(redis, task_id, "started")
-    logger.info(
-        f"Processing Strava webhook | user={user_id} | obj={object_id} | type={aspect_type}"
-    )
-
-    try:
-        if aspect_type not in ("create", "delete"):
-            await _publish_status(
-                redis,
-                task_id,
-                "skipped",
-                {"reason": f"Ignored aspect_type: {aspect_type}"},
-            )
-            return
-
-        from app.services.strava_service import StravaService
-        from app.models.watch import WatchConnection
-        from app.models.training import TrainingPlan
-        from sqlalchemy import select
-
-        strava = StravaService()
-
-        async with async_session() as db:
-            result = await db.execute(
-                select(WatchConnection).where(
-                    WatchConnection.user_id == user_id,
-                    WatchConnection.provider == "strava",
-                    WatchConnection.is_active == True,
-                )
-            )
-            strava_conn = result.scalar_one_or_none()
-
-            if not strava_conn:
-                return
-
-            # Gelöschte Aktivität: Plan-Status zurücksetzen
-            if aspect_type == "delete":
-                from datetime import datetime as _dt
-                event_date = _dt.fromtimestamp(event_time, tz=timezone.utc).date()
-                plan_result = await db.execute(
-                    select(TrainingPlan).where(
-                        TrainingPlan.user_id == user_id,
-                        TrainingPlan.date == event_date,
-                        TrainingPlan.status == "completed",
-                    )
-                )
-                plan = plan_result.scalar_one_or_none()
-                if plan:
-                    plan.status = "pending"
-                    await db.commit()
-                await _publish_status(redis, task_id, "completed", {"deleted": object_id})
-                logger.info(f"Strava activity deleted | user={user_id} | activity={object_id}")
-                return
-
-            # Token ggf. erneuern und Aktivität laden
-            try:
-                activity = await strava.get_activity(strava_conn.access_token, object_id)
-            except Exception:
-                new_tokens = await strava.refresh_token(strava_conn.refresh_token)
-                strava_conn.access_token = new_tokens["access_token"]
-                strava_conn.refresh_token = new_tokens.get(
-                    "refresh_token", strava_conn.refresh_token
-                )
-                # Token sofort persistieren damit spätere Calls funktionieren
-                await db.commit()
-                activity = await strava.get_activity(strava_conn.access_token, object_id)
-
-            update = strava.activity_to_training_plan_update(activity)
-            activity_date = date.fromisoformat(update["date"])
-
-            plan_result = await db.execute(
-                select(TrainingPlan).where(
-                    TrainingPlan.user_id == user_id,
-                    TrainingPlan.date == activity_date,
-                )
-            )
-            plan = plan_result.scalar_one_or_none()
-            if plan:
-                plan.status = "completed"
-                if update.get("avg_hr"):
-                    plan.target_hr_min = update["avg_hr"] - 10
-                    plan.target_hr_max = update["avg_hr"] + 10
-
-            strava_conn.last_synced_at = datetime.now(timezone.utc)
-            await db.commit()
-
-        await _publish_status(
-            redis, task_id, "completed", {"activity_date": update["date"]}
-        )
-        # Echtzeit-Event für das Frontend publishen
-        watch_event = json.dumps({
-            "event": "activity_synced",
-            "provider": "strava",
-            "activity_date": update["date"],
-            "workout_type": update.get("workout_type"),
-            "duration_min": update.get("duration_min"),
-        })
-        await redis.publish(f"watch_events:{user_id}", watch_event)
-        logger.info(f"Strava webhook processed | user={user_id} | activity={object_id}")
-
-    except Exception as e:
-        await _publish_status(redis, task_id, "failed", {"error": str(e)})
-        logger.error(f"Strava webhook processing failed | user={user_id} | error={e}")
 
 
 async def send_weekly_report(ctx: dict):
@@ -385,8 +198,6 @@ class WorkerSettings:
 
     functions = [
         generate_training_plan,
-        sync_strava_activities,
-        process_strava_webhook_event,
         send_weekly_report,
     ]
 

@@ -103,27 +103,7 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  frontend:
-    build: ./frontend
-    depends_on:
-      - backend
-    # KEINE Volume-Mounts — nutzt Standalone-Build
-    command: node server.js
-    environment:
-      - NODE_ENV=production
-      - PORT=3000
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://${DOMAIN}/api}
-      - NEXT_PUBLIC_VAPID_KEY=${VAPID_PUBLIC_KEY:-}
-      - NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN:-}
-      - BACKEND_URL=http://backend:8000
-    env_file: .env
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
+  # Frontend läuft auf Vercel (eigene Domain) — kein Container hier.
 
   db-backup:
     build: ./backup
@@ -153,11 +133,12 @@ services:
       - "443:443"
     depends_on:
       - backend
-      - frontend
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/nginx-api.conf:/etc/nginx/templates/default.conf.template:ro
       - certbot_etc:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
+    environment:
+      - DOMAIN=${DOMAIN}
     env_file: .env
     restart: unless-stopped
 

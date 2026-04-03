@@ -370,8 +370,8 @@ Ziele:
                 plan.workout_type = "rest"
                 plan.duration_min = 0
                 plan.intensity_zone = 1
-                plan.target_hr_min = 0
-                plan.target_hr_max = 0
+                plan.target_hr_min = None
+                plan.target_hr_max = None
                 plan.description = "Ruhetag (Coach-Empfehlung)"
                 await db.flush()
 

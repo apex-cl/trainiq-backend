@@ -1,9 +1,8 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CheckCircle2, RefreshCw } from "lucide-react";
 import { useWatchRealtime, type WatchSyncEvent } from "@/hooks/useWatchRealtime";
-import { useQueryClient } from "@tanstack/react-query";
 
 interface ToastState {
   id: number;
@@ -11,14 +10,14 @@ interface ToastState {
 }
 
 /**
- * Lauscht auf Strava/Garmin Webhook-Events und zeigt eine kurze Benachrichtigung,
+  * Lauscht auf Garmin/Watch-Webhook-Events und zeigt eine kurze Benachrichtigung,
  * wenn eine neue Aktivität automatisch synchronisiert wurde.
  * Wird einmal im AppLayout eingebunden.
  */
 export function WatchRealtimeSync() {
   const { lastEvent } = useWatchRealtime();
   const [toasts, setToasts] = useState<ToastState[]>([]);
-  const counterRef = { current: 0 };
+  const counterRef = useRef(0);
 
   useEffect(() => {
     if (!lastEvent || lastEvent.event !== "activity_synced") return;

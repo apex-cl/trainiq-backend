@@ -1,12 +1,14 @@
 """
 Watch/Fitness-Tracker Sync Routes
-Unterstützt: Strava OAuth2, Webhooks, Manuelle Eingabe
+Unterstützt: Garmin, Polar, Wahoo, Fitbit, Suunto, Withings, COROS, Zepp, WHOOP, Samsung Health, Google Fit, Apple Watch, Manuelle Eingabe
 """
 
 import asyncio
+import json
 import secrets
 import uuid as uuid_module
 from datetime import datetime, timezone
+from loguru import logger
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,31 +20,18 @@ from app.models.user import User
 from app.models.watch import WatchConnection
 from app.models.training import TrainingPlan
 from app.models.metrics import HealthMetric
-from app.services.strava_service import StravaService
 from app.services.garmin_service import GarminService
-from app.services.polar_service import PolarService
-from app.services.wahoo_service import WahooService
-from app.services.fitbit_service import FitbitService
-from app.services.suunto_service import SuuntoService
-from app.services.withings_service import WithingsService
-from app.services.coros_service import CorosService
-from app.services.zepp_service import ZeppService
-from app.services.whoop_service import WhoopService
-from app.services.samsung_health_service import SamsungHealthService
-from app.services.google_fit_service import GoogleFitService
+from app.services.strava_service import StravaService
+from app.services.fit_import_service import FitImportService, TcxImportService, GpxImportService, CsvImportService
 from app.core.config import settings
-import redis.asyncio as aioredis
+from app.core.redis import get_redis
 
 # CSRF-State TTL für OAuth-Flows (10 Minuten)
 _OAUTH_STATE_TTL = 600
-_redis_client: aioredis.Redis | None = None
 
 
-def _get_redis() -> aioredis.Redis:
-    global _redis_client
-    if _redis_client is None:
-        _redis_client = aioredis.from_url(settings.redis_url)
-    return _redis_client
+def _get_redis():
+    return get_redis()
 
 
 async def _store_oauth_state(state_token: str, user_id: str) -> None:
@@ -53,10 +42,12 @@ async def _store_oauth_state(state_token: str, user_id: str) -> None:
 
 async def _consume_oauth_state(state_token: str) -> str | None:
     """Liest und löscht OAuth-State-Token aus Redis. Gibt user_id zurück oder None."""
-    r = _get_redis()
-    key = f"oauth_state:{state_token}"
-    user_id = await r.getdel(key)
-    return user_id.decode() if user_id else None
+    try:
+        r = _get_redis()
+        key = f"oauth_state:{state_token}"
+        return await r.getdel(key)  # str with decode_responses=True
+    except Exception:
+        return None
 
 
 async def _refresh_token_for(conn: WatchConnection, service) -> bool:
@@ -78,18 +69,147 @@ async def _refresh_token_for(conn: WatchConnection, service) -> bool:
 
 
 router = APIRouter()
-strava = StravaService()
 garmin = GarminService()
-polar = PolarService()
-wahoo = WahooService()
-fitbit = FitbitService()
-suunto = SuuntoService()
-withings = WithingsService()
-coros = CorosService()
-zepp = ZeppService()
-whoop = WhoopService()
-samsung_health = SamsungHealthService()
-google_fit = GoogleFitService()
+strava = StravaService()
+fit_importer = FitImportService()
+tcx_importer = TcxImportService()
+gpx_importer = GpxImportService()
+csv_importer = CsvImportService()
+
+
+# ─── 12-Monats Hintergrund-Import nach OAuth-Verbindung ───────────────────────
+
+async def _start_initial_import(
+    user_id_str: str,
+    provider: str,
+    access_token: str,
+    open_id: str | None = None,
+) -> None:
+    """
+    Importiert die letzten 12 Monate Aktivitäten nach erfolgreicher OAuth-Verbindung.
+    Läuft als asyncio.create_task(), blockiert nie den Request.
+    """
+    import time as _time
+    import datetime as _dt
+    from datetime import date as _date, timedelta as _td, timezone as _tz
+    from app.core.database import async_session as _sessions
+
+    now = _dt.datetime.now(_tz.utc)
+    year_ago = now - _td(days=365)
+    user_uuid = uuid_module.UUID(user_id_str)
+    year_ago_unix = int(year_ago.timestamp())
+    now_unix = int(now.timestamp())
+    year_ago_ms = year_ago_unix * 1000
+    now_ms = now_unix * 1000
+    year_ago_iso = year_ago.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    items_with_update: list[dict] = []
+    raw_activities: list[dict] = []
+    try:
+        if provider == "strava":
+            raw_activities = await strava.get_activities(access_token, after_unix=year_ago_unix, limit=200)
+            items_with_update = [strava.activity_to_training_plan_update(a) for a in raw_activities]
+    except Exception:
+        return  # Verbindung ist gespeichert — stündlicher Scheduler holt den Rest
+
+    now_utc = _dt.datetime.now(_tz.utc)
+    async with _sessions() as db:
+        try:
+            for idx, update in enumerate(items_with_update):
+                if not update or not update.get("date"):
+                    continue
+                try:
+                    plan_date = _date.fromisoformat(update["date"])
+                except (ValueError, TypeError):
+                    continue
+                pr = await db.execute(
+                    select(TrainingPlan).where(
+                        TrainingPlan.user_id == user_uuid,
+                        TrainingPlan.date == plan_date,
+                    )
+                )
+                plan = pr.scalar_one_or_none()
+                if plan:
+                    plan.status = "completed"
+                    if update.get("avg_hr"):
+                        plan.target_hr_min = update["avg_hr"] - 10
+                        plan.target_hr_max = update["avg_hr"] + 10
+                else:
+                    db.add(TrainingPlan(
+                        user_id=user_uuid,
+                        date=plan_date,
+                        sport=update.get("sport_type") or update.get("sport") or "other",
+                        workout_type="imported",
+                        duration_min=update.get("duration_min"),
+                        target_hr_min=update["avg_hr"] - 10 if update.get("avg_hr") else None,
+                        target_hr_max=update["avg_hr"] + 10 if update.get("avg_hr") else None,
+                        status="completed",
+                        description=update.get("activity_name") or update.get("sport") or None,
+                    ))
+
+                # Save ActivityDetail for PR / Bestzeiten calculation
+                if idx < len(raw_activities):
+                    from app.models.analytics import ActivityDetail as _AD
+                    _raw = raw_activities[idx]
+                    _ext_id = str(_raw.get("id") or "")
+                    _dist = _raw.get("distance")
+                    _elapsed = _raw.get("elapsed_time") or _raw.get("moving_time")
+                    if _ext_id and _dist and _elapsed:
+                        _ex = await db.execute(
+                            select(_AD).where(
+                                _AD.user_id == user_uuid,
+                                _AD.external_id == _ext_id,
+                                _AD.source == "strava",
+                            )
+                        )
+                        if not _ex.scalar_one_or_none():
+                            db.add(_AD(
+                                user_id=user_uuid,
+                                source="strava",
+                                external_id=_ext_id,
+                                name=_raw.get("name"),
+                                sport_type=update.get("sport_type") or "other",
+                                activity_date=update["date"],
+                                distance_m=float(_dist),
+                                elapsed_time_s=int(_elapsed),
+                                moving_time_s=int(_raw["moving_time"]) if _raw.get("moving_time") else None,
+                                average_heartrate=_raw.get("average_heartrate"),
+                                max_heartrate=_raw.get("max_heartrate"),
+                            ))
+            wc_res = await db.execute(
+                select(WatchConnection).where(
+                    WatchConnection.user_id == user_uuid,
+                    WatchConnection.provider == provider,
+                    WatchConnection.is_active == True,
+                )
+            )
+            wc = wc_res.scalar_one_or_none()
+            if wc:
+                wc.last_synced_at = now_utc
+            await db.commit()
+        except Exception:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+    # Bust Redis caches so the frontend sees the imported data immediately
+    try:
+        _r = _get_redis()
+        _plan_keys = await _r.keys(f"plan:{user_uuid}:*")
+        if _plan_keys:
+            await _r.delete(*_plan_keys)
+        _recovery_keys = await _r.keys(f"recovery:{user_uuid}:*")
+        if _recovery_keys:
+            await _r.delete(*_recovery_keys)
+        await _r.delete(f"achievements:{user_uuid}")
+        await _r.publish(
+            f"watch_events:{user_uuid}",
+            json.dumps({"event": "activity_synced", "provider": provider}),
+        )
+    except Exception:
+        pass
 
 
 # ─── Status ───────────────────────────────────────────────────────────────────
@@ -108,6 +228,7 @@ async def get_status(
         )
     )
     connections = result.scalars().all()
+
     return {
         "connected": [
             {
@@ -118,113 +239,10 @@ async def get_status(
             }
             for c in connections
         ],
+        "garmin_available": True,   # garminconnect SSO — kein API-Key nötig
         "strava_available": bool(settings.strava_client_id),
-        "garmin_available": bool(settings.garmin_client_id),
-        "polar_available": bool(settings.polar_client_id),
-        "wahoo_available": bool(settings.wahoo_client_id),
-        "fitbit_available": bool(settings.fitbit_client_id),
-        "suunto_available": bool(settings.suunto_client_id),
-        "withings_available": bool(settings.withings_client_id),
-        "coros_available": bool(settings.coros_client_id),
-        "zepp_available": bool(settings.zepp_client_id),
-        "whoop_available": bool(settings.whoop_client_id),
-        "samsung_health_available": bool(settings.samsung_health_client_id),
-        "google_fit_available": bool(settings.google_fit_client_id),
+        "apple_watch_available": True,  # Koppelcode — kein API-Key nötig
     }
-
-
-# ─── Strava OAuth ──────────────────────────────────────────────────────────────
-
-
-@router.get("/strava/connect")
-async def strava_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur Strava OAuth-Seite weiter."""
-    if not settings.strava_client_id:
-        raise HTTPException(status_code=503, detail="Strava nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = strava.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/strava/callback")
-async def strava_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Strava leitet hierher weiter nach Authorization.
-    Tauscht Code gegen Token und speichert Verbindung.
-    """
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await strava.exchange_code(code)
-        athlete_data = await strava.get_athlete(token_data["access_token"])
-    except Exception as e:
-        raise HTTPException(
-            status_code=400, detail="Strava-Authentifizierung fehlgeschlagen"
-        )
-
-    athlete_id = str(athlete_data.get("id", ""))
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "strava",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data["refresh_token"]
-        connection.provider_athlete_id = athlete_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="strava",
-            provider_athlete_id=athlete_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data["refresh_token"],
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?strava=connected")
-
-
-@router.post("/strava/disconnect")
-async def strava_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Strava-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "strava",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
 
 
 # ─── Garmin Credential-Login ─────────────────────────────────────────────────
@@ -242,19 +260,22 @@ async def garmin_login(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Login mit Garmin-Connect-Zugangsdaten.
+    Login + automatischer Import der letzten 12 Monate.
     Kein Enterprise-API-Key nötig — nutzt garminconnect-Library (Android-App-SSO).
     """
     try:
         token_data = await garmin.login(body.email, body.password)
     except Exception as e:
-        import logging
-        logging.getLogger("garmin").error(f"Garmin login failed: {e}")
+        logger.warning(f"Garmin login failed | user={current_user.id} | error={e}")
         raise HTTPException(
             status_code=400,
-            detail=f"Garmin-Login fehlgeschlagen: {str(e) or 'Prüfe E-Mail und Passwort.'}",
+            detail="Garmin-Login fehlgeschlagen. Prüfe E-Mail und Passwort.",
         )
 
+    tokens_json = token_data.get("tokens_json", "")
+    display_name = token_data.get("display_name", "")
+
+    # Save connection
     result = await db.execute(
         select(WatchConnection).where(
             WatchConnection.user_id == current_user.id,
@@ -262,10 +283,6 @@ async def garmin_login(
         )
     )
     connection = result.scalar_one_or_none()
-
-    tokens_json = token_data.get("tokens_json", "")
-    display_name = token_data.get("display_name", "")
-
     if connection:
         connection.access_token = tokens_json
         connection.refresh_token = None
@@ -281,9 +298,262 @@ async def garmin_login(
             is_active=True,
         )
         db.add(connection)
-
     await db.commit()
-    return {"ok": True, "display_name": display_name}
+    conn_id = connection.id
+
+    # Auto-import last 12 months in background (don't block login response)
+    async def _import_background():
+        from datetime import date as _date, timedelta as _td
+        from app.core.database import async_session as _sf
+        today = _date.today()
+        from_date = (today - _td(days=365)).isoformat()
+        to_date = today.isoformat()
+        logger.info(f"Garmin background import started | user={current_user.id} | range={from_date}…{to_date}")
+        try:
+            activities = await garmin.get_activities_by_date(tokens_json, from_date, to_date)
+        except Exception as _e:
+            logger.warning(f"Garmin get_activities failed | user={current_user.id} | error={_e}")
+            return
+        if not isinstance(activities, list):
+            logger.warning(f"Garmin get_activities returned non-list | user={current_user.id} | got={type(activities)}")
+            return
+        logger.info(f"Garmin fetched {len(activities)} activities | user={current_user.id}")
+
+        # Collect all unique dates to fetch stats for:
+        # - Last 90 days (to ensure recent data is always fresh)
+        # - All activity dates (so stress/steps are saved for real training days)
+        _stats_dates: set[str] = set()
+        for _i in range(90):
+            _stats_dates.add((today - _td(days=_i)).isoformat())
+        for _act in activities:
+            _st = (_act.get("startTimeLocal") or "")[:10]
+            if len(_st) == 10:
+                _stats_dates.add(_st)
+        logger.info(f"Garmin fetching daily stats for {len(_stats_dates)} dates | user={current_user.id}")
+
+        # Fetch stats per day (4 calls in parallel per day) to avoid Garmin rate limits
+        _daily_stats: dict[str, dict] = {}
+        for _day_iso in sorted(_stats_dates, reverse=True):
+            try:
+                _stats_raw, _sleep_raw, _vo2_raw, _hrv_raw = await asyncio.gather(
+                    garmin.get_stats(tokens_json, _day_iso),
+                    garmin.get_sleep_data(tokens_json, _day_iso),
+                    garmin.get_max_metrics(tokens_json, _day_iso),
+                    garmin.get_hrv_data(tokens_json, _day_iso),
+                    return_exceptions=True,
+                )
+                _summary = garmin.parse_daily_stats(_stats_raw) if isinstance(_stats_raw, dict) else {}
+                # stress_score=-1 means "insufficient data" → treat as null
+                if _summary.get("stress_score") is not None and _summary["stress_score"] < 0:
+                    _summary["stress_score"] = None
+                _sleep_parsed = garmin.parse_sleep(_sleep_raw) if isinstance(_sleep_raw, dict) else {}
+                _daily_stats[_day_iso] = {
+                    "summary": _summary,
+                    "sleep": _sleep_parsed,
+                    "vo2_max": garmin.parse_vo2_max(_vo2_raw),
+                    "hrv": garmin.parse_hrv(_hrv_raw) if isinstance(_hrv_raw, dict) else None,
+                }
+            except Exception:
+                continue
+
+        now = datetime.now(timezone.utc)
+        async with _sf() as s:
+            for activity in activities:
+                upd = garmin.activity_to_training_plan_update(activity)
+                if not upd or not upd.get("date"):
+                    continue
+                try:
+                    act_date = _date.fromisoformat(upd["date"])
+                except ValueError:
+                    continue
+
+                # Upsert TrainingPlan
+                pr = await s.execute(
+                    select(TrainingPlan).where(
+                        TrainingPlan.user_id == current_user.id,
+                        TrainingPlan.date == act_date,
+                    )
+                )
+                plan = pr.scalar_one_or_none()
+                if plan:
+                    plan.status = "completed"
+                    plan.completed_at = now
+                    if upd.get("avg_hr"):
+                        plan.target_hr_min = upd["avg_hr"] - 10
+                        plan.target_hr_max = upd["avg_hr"] + 10
+                    if upd.get("duration_min"):
+                        plan.duration_min = upd["duration_min"]
+                else:
+                    plan = TrainingPlan(
+                        user_id=current_user.id,
+                        date=act_date,
+                        sport=upd.get("sport_type") or "other",
+                        workout_type="imported",
+                        duration_min=upd.get("duration_min"),
+                        target_hr_min=upd["avg_hr"] - 10 if upd.get("avg_hr") else None,
+                        target_hr_max=upd["avg_hr"] + 10 if upd.get("avg_hr") else None,
+                        status="completed",
+                        completed_at=now,
+                        description=upd.get("activity_name") or None,
+                    )
+                    s.add(plan)
+
+                # Save HealthMetric from activity data (only steps — avg_hr is exercise HR, not resting HR)
+                steps = activity.get("steps")
+                if steps is not None:
+                    # Use noon on that day as recorded_at so it doesn't clash with daily-stats entries
+                    from datetime import timezone as _tz
+                    recorded_at = datetime(act_date.year, act_date.month, act_date.day, 12, 0, 0, tzinfo=_tz.utc)
+                    # Check if we already have a garmin metric for this day
+                    existing_metric = await s.execute(
+                        select(HealthMetric).where(
+                            HealthMetric.user_id == current_user.id,
+                            HealthMetric.recorded_at >= datetime(act_date.year, act_date.month, act_date.day, 0, 0, 0, tzinfo=_tz.utc),
+                            HealthMetric.recorded_at < datetime(act_date.year, act_date.month, act_date.day, 23, 59, 59, tzinfo=_tz.utc),
+                            HealthMetric.source == "garmin",
+                        )
+                    )
+                    existing_metric = existing_metric.scalar_one_or_none()
+                    if existing_metric:
+                        if existing_metric.steps is None:
+                            existing_metric.steps = int(steps)
+                    else:
+                        s.add(HealthMetric(
+                            user_id=current_user.id,
+                            recorded_at=recorded_at,
+                            steps=int(steps),
+                            source="garmin",
+                        ))
+
+                # Save ActivityDetail for PR / Bestzeiten calculation
+                from app.models.analytics import ActivityDetail
+                _ext_id = str(activity.get("activityId") or "")
+                _dist = activity.get("distance")
+                _elapsed = activity.get("elapsedDuration") or activity.get("duration")
+                if _ext_id and _dist and _elapsed:
+                    _existing_ad = await s.execute(
+                        select(ActivityDetail).where(
+                            ActivityDetail.user_id == current_user.id,
+                            ActivityDetail.external_id == _ext_id,
+                            ActivityDetail.source == "garmin",
+                        )
+                    )
+                    if not _existing_ad.scalar_one_or_none():
+                        s.add(ActivityDetail(
+                            user_id=current_user.id,
+                            source="garmin",
+                            external_id=_ext_id,
+                            name=activity.get("activityName"),
+                            sport_type=upd.get("sport_type") or "other",
+                            activity_date=upd["date"],
+                            distance_m=float(_dist),
+                            elapsed_time_s=int(float(_elapsed)),
+                            moving_time_s=int(float(activity["movingDuration"])) if activity.get("movingDuration") else None,
+                            average_heartrate=activity.get("averageHR"),
+                            max_heartrate=activity.get("maxHR"),
+                            average_cadence=activity.get("averageRunningCadenceInStepsPerMinute"),
+                            average_stride_length=activity.get("avgStrideLength"),
+                        ))
+
+            # Upsert 14-day daily stats (resting HR, sleep, stress, HRV, VO₂, SpO₂) for recovery scores
+            from datetime import timezone as _tz2
+            for _day_iso, _day_data in _daily_stats.items():
+                _summary = _day_data["summary"]
+                _sleep_info = _day_data["sleep"]
+                _vo2 = _day_data.get("vo2_max")
+                _hrv = _day_data.get("hrv")
+                _spo2 = _summary.get("spo2")
+                # Use sleep overnight resting HR as fallback if daytime resting HR is missing
+                _resting_hr = _summary.get("resting_hr") or _sleep_info.get("sleep_avg_hr")
+                if not any([
+                    _resting_hr, _summary.get("steps"),
+                    _summary.get("stress_score"), _sleep_info.get("sleep_duration_min"),
+                    _vo2, _hrv, _spo2,
+                ]):
+                    continue
+                _ddt = _date.fromisoformat(_day_iso)
+                _d_start = datetime(_ddt.year, _ddt.month, _ddt.day, 0, 0, 0, tzinfo=_tz2.utc)
+                _d_end = datetime(_ddt.year, _ddt.month, _ddt.day, 23, 59, 59, tzinfo=_tz2.utc)
+                _em = await s.execute(
+                    select(HealthMetric).where(
+                        HealthMetric.user_id == current_user.id,
+                        HealthMetric.recorded_at >= _d_start,
+                        HealthMetric.recorded_at <= _d_end,
+                        HealthMetric.source == "garmin",
+                    )
+                )
+                _em = _em.scalar_one_or_none()
+                if _em:
+                    if _resting_hr is not None:
+                        _em.resting_hr = _resting_hr
+                    if _summary.get("steps") is not None:
+                        _em.steps = _summary["steps"]
+                    if _summary.get("stress_score") is not None:
+                        _em.stress_score = _summary["stress_score"]
+                    if _sleep_info.get("sleep_duration_min") is not None:
+                        _em.sleep_duration_min = _sleep_info["sleep_duration_min"]
+                    if _sleep_info.get("sleep_stages") is not None:
+                        _em.sleep_stages = _sleep_info["sleep_stages"]
+                    if _vo2 is not None:
+                        _em.vo2_max = _vo2
+                    if _hrv is not None:
+                        _em.hrv = _hrv
+                    if _spo2 is not None:
+                        _em.spo2 = _spo2
+                else:
+                    _noon = datetime(_ddt.year, _ddt.month, _ddt.day, 12, 0, 0, tzinfo=_tz2.utc)
+                    s.add(HealthMetric(
+                        user_id=current_user.id,
+                        recorded_at=_noon,
+                        resting_hr=_resting_hr,
+                        steps=_summary.get("steps"),
+                        stress_score=_summary.get("stress_score"),
+                        sleep_duration_min=_sleep_info.get("sleep_duration_min"),
+                        sleep_stages=_sleep_info.get("sleep_stages"),
+                        vo2_max=_vo2,
+                        hrv=_hrv,
+                        spo2=_spo2,
+                        source="garmin",
+                    ))
+
+            wc = await s.execute(select(WatchConnection).where(WatchConnection.id == conn_id))
+            wc = wc.scalar_one_or_none()
+            if wc:
+                wc.last_synced_at = datetime.now(timezone.utc)
+            await s.commit()
+            logger.info(f"Garmin background import committed | user={current_user.id}")
+
+            # Recalculate fitness snapshots (CTL/ATL/TSB) from the newly imported data
+            try:
+                from app.services.activity_analytics import save_fitness_snapshots
+                _fit_uid = uuid_module.UUID(str(current_user.id))
+                await save_fitness_snapshots(_fit_uid, s, days=365)
+                logger.info(f"Garmin fitness snapshots recalculated | user={current_user.id}")
+            except Exception as _fe:
+                logger.warning(f"Garmin fitness snapshot recalc failed | user={current_user.id} | error={_fe}")
+
+        # Bust ALL Redis caches so the frontend sees the imported data immediately
+        try:
+            _r = _get_redis()
+            _plan_keys = await _r.keys(f"plan:{current_user.id}:*")
+            if _plan_keys:
+                await _r.delete(*_plan_keys)
+            _recovery_keys = await _r.keys(f"recovery:{current_user.id}:*")
+            if _recovery_keys:
+                await _r.delete(*_recovery_keys)
+            await _r.delete(f"achievements:{current_user.id}")
+            # Notify the frontend SSE stream so all widgets reload automatically
+            await _r.publish(
+                f"watch_events:{current_user.id}",
+                json.dumps({"event": "activity_synced", "provider": "garmin"}),
+            )
+            logger.info(f"Garmin import: cache cleared + SSE event published | user={current_user.id}")
+        except Exception as _ce:
+            logger.warning(f"Garmin import: cache/publish failed | user={current_user.id} | error={_ce}")
+
+    asyncio.create_task(_import_background())
+
+    return {"ok": True, "display_name": display_name, "importing": True, "redirect_url": f"{settings.frontend_url}/einstellungen?provider=garmin"}
 
 
 @router.get("/garmin/connect")
@@ -313,6 +583,222 @@ async def garmin_disconnect(
     return {"ok": True}
 
 
+# ─── Strava OAuth ──────────────────────────────────────────────────────────────
+# Strava ist ein kostenloser Hub für alle Uhren.
+# Einmalige Registrierung unter https://www.strava.com/settings/api
+# deckt ab: Polar, Wahoo, Fitbit, Suunto, COROS, Zepp/Amazfit,
+#           Samsung Health, WHOOP, Google Fit (Wear OS), Apple Watch
+
+
+@router.get("/strava/connect")
+async def strava_connect(
+    current_user: User = Depends(get_current_user),
+):
+    """Leitet den User zur Strava OAuth2-Seite weiter."""
+    if not settings.strava_client_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Strava: Bitte STRAVA_CLIENT_ID und STRAVA_CLIENT_SECRET in der .env setzen. "
+                   "Kostenlose Registrierung unter https://www.strava.com/settings/api",
+        )
+    state = secrets.token_urlsafe(32)
+    await _store_oauth_state(state, str(current_user.id))
+    auth_url = strava.get_auth_url(state=state)
+    return {"auth_url": auth_url}
+
+
+@router.get("/strava/callback")
+async def strava_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Strava leitet hierher weiter nach Authorization."""
+    user_id_str = await _consume_oauth_state(state)
+    if not user_id_str:
+        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
+
+    try:
+        target_user_id = uuid_module.UUID(user_id_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
+
+    try:
+        token_data = await strava.exchange_code(code)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Strava-Authentifizierung fehlgeschlagen")
+
+    result = await db.execute(
+        select(WatchConnection).where(
+            WatchConnection.user_id == target_user_id,
+            WatchConnection.provider == "strava",
+        )
+    )
+    connection = result.scalar_one_or_none()
+
+    if connection:
+        connection.access_token = token_data["access_token"]
+        connection.refresh_token = token_data["refresh_token"]
+        connection.provider_athlete_id = token_data.get("athlete_id")
+        connection.is_active = True
+    else:
+        connection = WatchConnection(
+            user_id=target_user_id,
+            provider="strava",
+            provider_athlete_id=token_data.get("athlete_id"),
+            access_token=token_data["access_token"],
+            refresh_token=token_data["refresh_token"],
+            is_active=True,
+        )
+        db.add(connection)
+
+    await db.commit()
+    asyncio.create_task(
+        _start_initial_import(user_id_str, "strava", token_data["access_token"])
+    )
+    return RedirectResponse(
+        url=f"{settings.frontend_url}/einstellungen?provider=strava"
+    )
+
+
+@router.post("/strava/disconnect")
+async def strava_disconnect(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trennt Strava-Verbindung."""
+    result = await db.execute(
+        select(WatchConnection).where(
+            WatchConnection.user_id == current_user.id,
+            WatchConnection.provider == "strava",
+        )
+    )
+    connection = result.scalar_one_or_none()
+    if connection:
+        connection.is_active = False
+        await db.commit()
+    return {"ok": True}
+
+
+class GarminSyncRangeRequest(BaseModel):
+    from_date: str  # YYYY-MM-DD
+    to_date: str    # YYYY-MM-DD
+
+
+@router.post("/garmin/sync-range")
+async def garmin_sync_range(
+    body: GarminSyncRangeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Importiert Garmin-Aktivitäten für einen Zeitraum."""
+    # Step 1: Fetch token from DB — do NOT hold the session open during the Garmin API call
+    conn_result = await db.execute(
+        select(WatchConnection).where(
+            WatchConnection.user_id == current_user.id,
+            WatchConnection.provider == "garmin",
+        )
+    )
+    conn = conn_result.scalar_one_or_none()
+    if not conn or not conn.access_token:
+        raise HTTPException(status_code=400, detail="Garmin nicht verbunden. Bitte zuerst einloggen.")
+
+    tokens_json = conn.access_token
+    conn_id = conn.id
+
+    # Step 2: Call Garmin API outside any DB transaction (can take a while)
+    try:
+        activities = await garmin.get_activities_by_date(tokens_json, body.from_date, body.to_date)
+    except Exception as e:
+        logger.warning(f"Garmin sync-range failed | user={current_user.id} | error={e}")
+        raise HTTPException(status_code=400, detail="Garmin-Import fehlgeschlagen. Bitte versuche es erneut.")
+
+    if not isinstance(activities, list):
+        activities = []
+
+    # Step 3: Write results in a fresh DB session (avoids long-lived connection problem)
+    from datetime import date as date_type
+    from app.core.database import async_session as _session_factory
+
+    imported_count = 0
+    async with _session_factory() as fresh_db:
+        for activity in activities:
+            update = garmin.activity_to_training_plan_update(activity)
+            if not update or not update.get("date"):
+                continue
+            try:
+                activity_date = date_type.fromisoformat(update["date"])
+            except ValueError:
+                continue
+            plan_result = await fresh_db.execute(
+                select(TrainingPlan).where(
+                    TrainingPlan.user_id == current_user.id,
+                    TrainingPlan.date == activity_date,
+                )
+            )
+            plan = plan_result.scalar_one_or_none()
+            if plan:
+                plan.status = "completed"
+                if update.get("avg_hr"):
+                    plan.target_hr_min = update["avg_hr"] - 10
+                    plan.target_hr_max = update["avg_hr"] + 10
+                if update.get("duration_min"):
+                    plan.duration_min = update["duration_min"]
+            else:
+                plan = TrainingPlan(
+                    user_id=current_user.id,
+                    date=activity_date,
+                    sport=update.get("sport_type") or "other",
+                    workout_type="imported",
+                    duration_min=update.get("duration_min"),
+                    target_hr_min=update["avg_hr"] - 10 if update.get("avg_hr") else None,
+                    target_hr_max=update["avg_hr"] + 10 if update.get("avg_hr") else None,
+                    status="completed",
+                    description=update.get("activity_name") or None,
+                )
+                fresh_db.add(plan)
+            imported_count += 1
+
+        # Update the WatchConnection as active
+        wc_result = await fresh_db.execute(
+            select(WatchConnection).where(WatchConnection.id == conn_id)
+        )
+        wc = wc_result.scalar_one_or_none()
+        if wc:
+            wc.is_active = True
+            wc.last_synced_at = datetime.now(timezone.utc)
+
+        await fresh_db.commit()
+
+        # Recalculate fitness snapshots (CTL/ATL/TSB) from the newly imported data
+        try:
+            from app.services.activity_analytics import save_fitness_snapshots
+            _fit_uid = uuid_module.UUID(str(current_user.id))
+            await save_fitness_snapshots(_fit_uid, fresh_db, days=365)
+        except Exception:
+            pass
+
+    # Bust ALL Redis caches so the frontend sees the synced data immediately
+    try:
+        _r = _get_redis()
+        _plan_keys = await _r.keys(f"plan:{current_user.id}:*")
+        if _plan_keys:
+            await _r.delete(*_plan_keys)
+        _recovery_keys = await _r.keys(f"recovery:{current_user.id}:*")
+        if _recovery_keys:
+            await _r.delete(*_recovery_keys)
+        await _r.delete(f"achievements:{current_user.id}")
+        # Notify the frontend SSE stream so all widgets reload automatically
+        await _r.publish(
+            f"watch_events:{current_user.id}",
+            json.dumps({"event": "activity_synced", "provider": "garmin"}),
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "imported": imported_count}
+
+
 # ─── Sync ─────────────────────────────────────────────────────────────────────
 
 
@@ -323,66 +809,13 @@ async def sync(
 ):
     """
     Synchronisiert Aktivitäten von verbundenen Trackern.
-    Unterstützt: Strava, Garmin, Polar, Wahoo, Fitbit, Suunto, Withings,
-    COROS, Zepp/Amazfit, WHOOP, Samsung Health, Google Fit, Apple Watch.
+    Unterstützt: Garmin (SSO), Strava (Hub für alle anderen Uhren), Apple Watch.
     """
     synced_count = 0
     providers = []
+    any_conn = False
 
-    # Strava-Verbindung laden
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "strava",
-            WatchConnection.is_active == True,
-        )
-    )
-    strava_conn = result.scalar_one_or_none()
-
-    if strava_conn:
-        try:
-            activities = await strava.get_recent_activities(
-                strava_conn.access_token, limit=10
-            )
-        except Exception:
-            try:
-                new_tokens = await strava.refresh_token(strava_conn.refresh_token)
-                strava_conn.access_token = new_tokens["access_token"]
-                strava_conn.refresh_token = new_tokens.get(
-                    "refresh_token", strava_conn.refresh_token
-                )
-                activities = await strava.get_recent_activities(
-                    strava_conn.access_token, limit=10
-                )
-            except Exception:
-                activities = []
-
-        if activities:
-            from datetime import date
-
-            for activity in activities:
-                update = strava.activity_to_training_plan_update(activity)
-                if not update["date"]:
-                    continue
-                activity_date = date.fromisoformat(update["date"])
-                plan_result = await db.execute(
-                    select(TrainingPlan).where(
-                        TrainingPlan.user_id == current_user.id,
-                        TrainingPlan.date == activity_date,
-                    )
-                )
-                plan = plan_result.scalar_one_or_none()
-                if plan and plan.status != "completed":
-                    plan.status = "completed"
-                    if update.get("avg_hr"):
-                        plan.target_hr_min = update["avg_hr"] - 10
-                        plan.target_hr_max = update["avg_hr"] + 10
-                    synced_count += 1
-
-            strava_conn.last_synced_at = datetime.now(timezone.utc)
-            providers.append("strava")
-
-    # Garmin-Verbindung laden
+    # ── Garmin ────────────────────────────────────────────────────────────────
     garmin_result = await db.execute(
         select(WatchConnection).where(
             WatchConnection.user_id == current_user.id,
@@ -393,40 +826,79 @@ async def sync(
     garmin_conn = garmin_result.scalar_one_or_none()
 
     if garmin_conn:
+        any_conn = True
         _refreshed = False
         while True:
             try:
                 from datetime import date, timedelta
 
                 today = date.today().isoformat()
-                # Fetch daily summary + sleep in parallel for full health data
-                daily_task = garmin.get_daily_summary(garmin_conn.access_token, today)
+                daily_task = garmin.get_stats(garmin_conn.access_token, today)
                 sleep_task = garmin.get_sleep_data(garmin_conn.access_token, today)
-                activities_task = garmin.get_activities(garmin_conn.access_token, today, today)
-                daily_data, sleep_data, activities = await asyncio.gather(
-                    daily_task, sleep_task, activities_task,
+                activities_task = garmin.get_activities_by_date(garmin_conn.access_token, today, today)
+                vo2_task = garmin.get_max_metrics(garmin_conn.access_token, today)
+                hrv_task = garmin.get_hrv_data(garmin_conn.access_token, today)
+                daily_data, sleep_data, activities, vo2_data, hrv_data = await asyncio.gather(
+                    daily_task, sleep_task, activities_task, vo2_task, hrv_task,
                     return_exceptions=True,
                 )
 
-                summary = garmin.parse_daily_summary(daily_data) if isinstance(daily_data, dict) else {}
+                summary = garmin.parse_daily_stats(daily_data) if isinstance(daily_data, dict) else {}
                 sleep_info = garmin.parse_sleep(sleep_data) if isinstance(sleep_data, dict) else {}
+                vo2_max_val = garmin.parse_vo2_max(vo2_data)
+                hrv_val = garmin.parse_hrv(hrv_data) if isinstance(hrv_data, dict) else None
+                spo2_val = summary.get("spo2")
+                resting_hr_val = summary.get("resting_hr") or sleep_info.get("sleep_avg_hr")
 
-                health_metric = HealthMetric(
-                    user_id=current_user.id,
-                    recorded_at=datetime.now(timezone.utc),
-                    resting_hr=summary.get("resting_hr"),
-                    steps=summary.get("steps"),
-                    stress_score=summary.get("stress_score"),
-                    sleep_duration_min=sleep_info.get("sleep_duration_min"),
-                    sleep_stages=sleep_info.get("sleep_stages"),
-                    source="garmin",
+                from datetime import date as _date_sync, timezone as _tz_sync
+                _today = _date_sync.today()
+                _day_start = datetime(_today.year, _today.month, _today.day, 0, 0, 0, tzinfo=_tz_sync.utc)
+                _day_end = datetime(_today.year, _today.month, _today.day, 23, 59, 59, tzinfo=_tz_sync.utc)
+                _existing_m = await db.execute(
+                    select(HealthMetric).where(
+                        HealthMetric.user_id == current_user.id,
+                        HealthMetric.recorded_at >= _day_start,
+                        HealthMetric.recorded_at <= _day_end,
+                        HealthMetric.source == "garmin",
+                    )
                 )
-                db.add(health_metric)
+                _existing_m = _existing_m.scalar_one_or_none()
+                if _existing_m:
+                    if resting_hr_val is not None:
+                        _existing_m.resting_hr = resting_hr_val
+                    if summary.get("steps") is not None:
+                        _existing_m.steps = summary["steps"]
+                    if summary.get("stress_score") is not None:
+                        _existing_m.stress_score = summary["stress_score"]
+                    if sleep_info.get("sleep_duration_min") is not None:
+                        _existing_m.sleep_duration_min = sleep_info["sleep_duration_min"]
+                    if sleep_info.get("sleep_stages") is not None:
+                        _existing_m.sleep_stages = sleep_info["sleep_stages"]
+                    if vo2_max_val is not None:
+                        _existing_m.vo2_max = vo2_max_val
+                    if hrv_val is not None:
+                        _existing_m.hrv = hrv_val
+                    if spo2_val is not None:
+                        _existing_m.spo2 = spo2_val
+                else:
+                    db.add(HealthMetric(
+                        user_id=current_user.id,
+                        recorded_at=datetime.now(timezone.utc),
+                        resting_hr=resting_hr_val,
+                        steps=summary.get("steps"),
+                        stress_score=summary.get("stress_score"),
+                        sleep_duration_min=sleep_info.get("sleep_duration_min"),
+                        sleep_stages=sleep_info.get("sleep_stages"),
+                        vo2_max=vo2_max_val,
+                        hrv=hrv_val,
+                        spo2=spo2_val,
+                        source="garmin",
+                    ))
                 synced_count += 1
 
                 if isinstance(activities, list):
                     for activity in activities:
-                        update = garmin.activity_to_training_plan_update(activity) if hasattr(garmin, "activity_to_training_plan_update") else {}
+                        update = garmin.activity_to_training_plan_update(activity)
                         if not update.get("date"):
                             continue
                         activity_date = date.fromisoformat(update["date"])
@@ -452,135 +924,28 @@ async def sync(
                     continue
                 break
 
-    # Polar-Verbindung laden
-    polar_result = await db.execute(
+    # ── Strava ────────────────────────────────────────────────────────────────
+    strava_result = await db.execute(
         select(WatchConnection).where(
             WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "polar",
+            WatchConnection.provider == "strava",
             WatchConnection.is_active == True,
         )
     )
-    polar_conn = polar_result.scalar_one_or_none()
+    strava_conn = strava_result.scalar_one_or_none()
 
-    if polar_conn and polar_conn.provider_athlete_id:
+    if strava_conn:
+        any_conn = True
         _refreshed = False
         while True:
             try:
-                polar_user_id = int(polar_conn.provider_athlete_id)
-                exercises = await polar.list_exercises(polar_conn.access_token, polar_user_id)
-                if exercises:
-                    from datetime import date
-
-                    for exercise in exercises:
-                        metric_data = polar.exercise_to_metric(exercise)
-                        exercise_date = date.fromisoformat(metric_data["date"]) if metric_data["date"] else date.today()
-                        plan_result = await db.execute(
-                            select(TrainingPlan).where(
-                                TrainingPlan.user_id == current_user.id,
-                                TrainingPlan.date == exercise_date,
-                            )
-                        )
-                        plan = plan_result.scalar_one_or_none()
-                        if plan and plan.status != "completed":
-                            plan.status = "completed"
-                            if metric_data.get("avg_hr"):
-                                plan.target_hr_min = metric_data["avg_hr"] - 10
-                                plan.target_hr_max = metric_data["avg_hr"] + 10
-                            synced_count += 1
-
-                    polar_conn.last_synced_at = datetime.now(timezone.utc)
-                    providers.append("polar")
-                break
-            except Exception:
-                if not _refreshed and await _refresh_token_for(polar_conn, polar):
-                    _refreshed = True
-                    continue
-                break
-
-    # Wahoo-Verbindung laden
-    wahoo_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "wahoo",
-            WatchConnection.is_active == True,
-        )
-    )
-    wahoo_conn = wahoo_result.scalar_one_or_none()
-
-    if wahoo_conn:
-        _refreshed = False
-        while True:
-            try:
-                workouts = await wahoo.get_workouts(wahoo_conn.access_token, limit=10)
-                if workouts:
-                    from datetime import date
-
-                    for workout in workouts:
-                        update = wahoo.workout_to_training_plan_update(workout)
-                        if not update["date"]:
-                            continue
-                        workout_date = date.fromisoformat(update["date"])
-                        plan_result = await db.execute(
-                            select(TrainingPlan).where(
-                                TrainingPlan.user_id == current_user.id,
-                                TrainingPlan.date == workout_date,
-                            )
-                        )
-                        plan = plan_result.scalar_one_or_none()
-                        if plan and plan.status != "completed":
-                            plan.status = "completed"
-                            if update.get("avg_hr"):
-                                plan.target_hr_min = update["avg_hr"] - 10
-                                plan.target_hr_max = update["avg_hr"] + 10
-                            synced_count += 1
-
-                    wahoo_conn.last_synced_at = datetime.now(timezone.utc)
-                    providers.append("wahoo")
-                break
-            except Exception:
-                if not _refreshed and await _refresh_token_for(wahoo_conn, wahoo):
-                    _refreshed = True
-                    continue
-                break
-
-    # Fitbit-Verbindung laden
-    fitbit_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "fitbit",
-            WatchConnection.is_active == True,
-        )
-    )
-    fitbit_conn = fitbit_result.scalar_one_or_none()
-
-    if fitbit_conn:
-        _refreshed = False
-        while True:
-            try:
-                from datetime import date, timedelta
-
-                today = date.today().isoformat()
-                yesterday = (date.today() - timedelta(days=1)).isoformat()
-
-                activities = await fitbit.get_activity_log(fitbit_conn.access_token, yesterday, limit=10)
-                hr_data = await fitbit.get_heart_rate_today(fitbit_conn.access_token, today)
-                sleep_data = await fitbit.get_sleep_today(fitbit_conn.access_token, today)
-
-                resting_hr = fitbit.parse_resting_hr(hr_data)
-                sleep_info = fitbit.parse_sleep(sleep_data)
-
-                health_metric = HealthMetric(
-                    user_id=current_user.id,
-                    recorded_at=datetime.now(timezone.utc),
-                    resting_hr=resting_hr,
-                    sleep_duration_min=sleep_info.get("sleep_duration_min"),
-                    source="fitbit",
-                )
-                db.add(health_metric)
-
+                from datetime import date, timedelta, timezone as _tz_s
+                yesterday = (date.today() - timedelta(days=1))
+                after_unix = int(datetime(yesterday.year, yesterday.month, yesterday.day, tzinfo=_tz_s.utc).timestamp())
+                activities = await strava.get_activities(strava_conn.access_token, after_unix=after_unix, limit=20)
                 for activity in activities:
-                    update = fitbit.activity_to_training_plan_update(activity)
-                    if not update["date"]:
+                    update = strava.activity_to_training_plan_update(activity)
+                    if not update.get("date"):
                         continue
                     activity_date = date.fromisoformat(update["date"])
                     plan_result = await db.execute(
@@ -595,479 +960,34 @@ async def sync(
                         if update.get("avg_hr"):
                             plan.target_hr_min = update["avg_hr"] - 10
                             plan.target_hr_max = update["avg_hr"] + 10
-                        synced_count += 1
-
-                fitbit_conn.last_synced_at = datetime.now(timezone.utc)
-                providers.append("fitbit")
+                    elif not plan:
+                        db.add(TrainingPlan(
+                            user_id=current_user.id,
+                            date=activity_date,
+                            sport=update.get("sport_type") or "other",
+                            workout_type="imported",
+                            duration_min=update.get("duration_min"),
+                            target_hr_min=update["avg_hr"] - 10 if update.get("avg_hr") else None,
+                            target_hr_max=update["avg_hr"] + 10 if update.get("avg_hr") else None,
+                            status="completed",
+                        ))
+                    synced_count += 1
+                strava_conn.last_synced_at = datetime.now(timezone.utc)
+                providers.append("strava")
                 break
             except Exception:
-                if not _refreshed and await _refresh_token_for(fitbit_conn, fitbit):
+                if not _refreshed and await _refresh_token_for(strava_conn, strava):
                     _refreshed = True
                     continue
                 break
 
-    # Suunto-Verbindung laden
-    suunto_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "suunto",
-            WatchConnection.is_active == True,
-        )
-    )
-    suunto_conn = suunto_result.scalar_one_or_none()
-
-    if suunto_conn:
-        import time as _time
-        _refreshed = False
-        while True:
-            try:
-                from datetime import date, timedelta
-
-                since_ms = int((_time.time() - 7 * 86400) * 1000)
-                workouts = await suunto.get_workouts(suunto_conn.access_token, limit=10, since=since_ms)
-                if workouts:
-                    for workout in workouts:
-                        update = suunto.workout_to_training_plan_update(workout)
-                        if not update["date"]:
-                            continue
-                        workout_date = date.fromisoformat(update["date"])
-                        plan_result = await db.execute(
-                            select(TrainingPlan).where(
-                                TrainingPlan.user_id == current_user.id,
-                                TrainingPlan.date == workout_date,
-                            )
-                        )
-                        plan = plan_result.scalar_one_or_none()
-                        if plan and plan.status != "completed":
-                            plan.status = "completed"
-                            if update.get("avg_hr"):
-                                plan.target_hr_min = update["avg_hr"] - 10
-                                plan.target_hr_max = update["avg_hr"] + 10
-                            synced_count += 1
-
-                    suunto_conn.last_synced_at = datetime.now(timezone.utc)
-                    providers.append("suunto")
-                break
-            except Exception:
-                if not _refreshed and await _refresh_token_for(suunto_conn, suunto):
-                    _refreshed = True
-                    continue
-                break
-
-    # Withings-Verbindung laden
-    withings_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "withings",
-            WatchConnection.is_active == True,
-        )
-    )
-    withings_conn = withings_result.scalar_one_or_none()
-
-    if withings_conn:
-        import time as _time
-        _refreshed = False
-        while True:
-            try:
-                from datetime import date, timedelta
-
-                today = date.today().isoformat()
-                yesterday = (date.today() - timedelta(days=1)).isoformat()
-                now_unix = int(_time.time())
-                week_ago_unix = now_unix - 7 * 86400
-
-                workouts = await withings.get_workouts(
-                    withings_conn.access_token,
-                    start_unix=week_ago_unix,
-                    end_unix=now_unix,
-                )
-                for workout in workouts:
-                    update = withings.workout_to_training_plan_update(workout)
-                    if not update["date"]:
-                        continue
-                    workout_date = date.fromisoformat(update["date"])
-                    plan_result = await db.execute(
-                        select(TrainingPlan).where(
-                            TrainingPlan.user_id == current_user.id,
-                            TrainingPlan.date == workout_date,
-                        )
-                    )
-                    plan = plan_result.scalar_one_or_none()
-                    if plan and plan.status != "completed":
-                        plan.status = "completed"
-                        if update.get("avg_hr"):
-                            plan.target_hr_min = update["avg_hr"] - 10
-                            plan.target_hr_max = update["avg_hr"] + 10
-                        synced_count += 1
-
-                sleep_raw = await withings.get_sleep(
-                    withings_conn.access_token,
-                    start_unix=week_ago_unix,
-                    end_unix=now_unix,
-                )
-                sleep_info = withings.sleep_to_metric(sleep_raw)
-
-                activity_list = await withings.get_activity(
-                    withings_conn.access_token, yesterday, today
-                )
-                steps = None
-                if activity_list:
-                    steps = activity_list[0].get("steps")
-
-                health_metric = HealthMetric(
-                    user_id=current_user.id,
-                    recorded_at=datetime.now(timezone.utc),
-                    resting_hr=sleep_info.get("resting_hr"),
-                    sleep_duration_min=sleep_info.get("sleep_duration_min"),
-                    sleep_quality_score=sleep_info.get("sleep_quality_score"),
-                    steps=steps,
-                    source="withings",
-                )
-                db.add(health_metric)
-
-                withings_conn.last_synced_at = datetime.now(timezone.utc)
-                providers.append("withings")
-                break
-            except Exception:
-                if not _refreshed and await _refresh_token_for(withings_conn, withings):
-                    _refreshed = True
-                    continue
-                break
-
-    # COROS-Verbindung laden
-    coros_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "coros",
-            WatchConnection.is_active == True,
-        )
-    )
-    coros_conn = coros_result.scalar_one_or_none()
-
-    if coros_conn and coros_conn.provider_athlete_id:
-        # COROS refresh benutzt open_id zusätzlich zum refresh_token
-        _refreshed = False
-        while True:
-            try:
-                from datetime import date
-
-                sports = await coros.get_sport_list(
-                    coros_conn.access_token, coros_conn.provider_athlete_id, size=10
-                )
-                if sports:
-                    for sport in sports:
-                        update = coros.sport_to_training_plan_update(sport)
-                        if not update["date"]:
-                            continue
-                        sport_date = date.fromisoformat(update["date"])
-                        plan_result = await db.execute(
-                            select(TrainingPlan).where(
-                                TrainingPlan.user_id == current_user.id,
-                                TrainingPlan.date == sport_date,
-                            )
-                        )
-                        plan = plan_result.scalar_one_or_none()
-                        if plan and plan.status != "completed":
-                            plan.status = "completed"
-                            if update.get("avg_hr"):
-                                plan.target_hr_min = update["avg_hr"] - 10
-                                plan.target_hr_max = update["avg_hr"] + 10
-                            synced_count += 1
-
-                    coros_conn.last_synced_at = datetime.now(timezone.utc)
-                    providers.append("coros")
-                break
-            except Exception:
-                if not _refreshed and coros_conn.refresh_token:
-                    try:
-                        new_tokens = await coros.refresh_token(
-                            coros_conn.refresh_token,
-                            coros_conn.provider_athlete_id,
-                        )
-                        coros_conn.access_token = new_tokens["access_token"]
-                        coros_conn.refresh_token = new_tokens.get(
-                            "refresh_token", coros_conn.refresh_token
-                        )
-                        _refreshed = True
-                        continue
-                    except Exception:
-                        pass
-                break
-
-    # Zepp/Amazfit-Verbindung laden
-    zepp_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "zepp",
-            WatchConnection.is_active == True,
-        )
-    )
-    zepp_conn = zepp_result.scalar_one_or_none()
-
-    if zepp_conn and zepp_conn.provider_athlete_id:
-        import time as _time
-        _refreshed = False
-        while True:
-            try:
-                from datetime import date
-
-                week_ago = int(_time.time()) - 7 * 86400
-                workouts = await zepp.get_workouts(
-                    zepp_conn.access_token,
-                    zepp_conn.provider_athlete_id,
-                    from_time=week_ago,
-                    limit=10,
-                )
-                if workouts:
-                    for workout in workouts:
-                        update = zepp.workout_to_training_plan_update(workout)
-                        if not update["date"]:
-                            continue
-                        workout_date = date.fromisoformat(update["date"])
-                        plan_result = await db.execute(
-                            select(TrainingPlan).where(
-                                TrainingPlan.user_id == current_user.id,
-                                TrainingPlan.date == workout_date,
-                            )
-                        )
-                        plan = plan_result.scalar_one_or_none()
-                        if plan and plan.status != "completed":
-                            plan.status = "completed"
-                            if update.get("avg_hr"):
-                                plan.target_hr_min = update["avg_hr"] - 10
-                                plan.target_hr_max = update["avg_hr"] + 10
-                            synced_count += 1
-
-                    zepp_conn.last_synced_at = datetime.now(timezone.utc)
-                    providers.append("zepp")
-                break
-            except Exception:
-                if not _refreshed and await _refresh_token_for(zepp_conn, zepp):
-                    _refreshed = True
-                    continue
-                break
-
-    # WHOOP-Verbindung laden
-    whoop_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "whoop",
-            WatchConnection.is_active == True,
-        )
-    )
-    whoop_conn = whoop_result.scalar_one_or_none()
-
-    if whoop_conn:
-        _refreshed = False
-        while True:
-            try:
-                from datetime import date, timedelta, timezone as _tz
-                import datetime as _dt
-
-                week_ago_iso = (
-                    _dt.datetime.now(_tz.utc) - timedelta(days=7)
-                ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                now_iso = _dt.datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-                workouts = await whoop.get_workout_collection(
-                    whoop_conn.access_token, start=week_ago_iso, end=now_iso, limit=10
-                )
-                for workout in workouts:
-                    update = whoop.workout_to_training_plan_update(workout)
-                    if not update["date"]:
-                        continue
-                    workout_date = date.fromisoformat(update["date"])
-                    plan_result = await db.execute(
-                        select(TrainingPlan).where(
-                            TrainingPlan.user_id == current_user.id,
-                            TrainingPlan.date == workout_date,
-                        )
-                    )
-                    plan = plan_result.scalar_one_or_none()
-                    if plan and plan.status != "completed":
-                        plan.status = "completed"
-                        if update.get("avg_hr"):
-                            plan.target_hr_min = update["avg_hr"] - 10
-                            plan.target_hr_max = update["avg_hr"] + 10
-                        synced_count += 1
-
-                recoveries = await whoop.get_recovery_collection(
-                    whoop_conn.access_token, start=week_ago_iso, end=now_iso, limit=5
-                )
-                for recovery in recoveries:
-                    rec_metric = whoop.recovery_to_metric(recovery)
-                    health_metric = HealthMetric(
-                        user_id=current_user.id,
-                        recorded_at=datetime.now(timezone.utc),
-                        hrv=rec_metric.get("hrv"),
-                        resting_hr=rec_metric.get("resting_hr"),
-                        spo2=rec_metric.get("spo2"),
-                        source="whoop",
-                    )
-                    db.add(health_metric)
-
-                sleeps = await whoop.get_sleep_collection(
-                    whoop_conn.access_token, start=week_ago_iso, end=now_iso, limit=5
-                )
-                for sleep in sleeps:
-                    sleep_info = whoop.sleep_to_metric(sleep)
-                    health_metric = HealthMetric(
-                        user_id=current_user.id,
-                        recorded_at=datetime.now(timezone.utc),
-                        sleep_duration_min=sleep_info.get("sleep_duration_min"),
-                        sleep_quality_score=sleep_info.get("sleep_quality_score"),
-                        source="whoop",
-                    )
-                    db.add(health_metric)
-
-                whoop_conn.last_synced_at = datetime.now(timezone.utc)
-                providers.append("whoop")
-                break
-            except Exception:
-                if not _refreshed and await _refresh_token_for(whoop_conn, whoop):
-                    _refreshed = True
-                    continue
-                break
-
-    # Samsung Health-Verbindung laden
-    samsung_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "samsung_health",
-            WatchConnection.is_active == True,
-        )
-    )
-    samsung_conn = samsung_result.scalar_one_or_none()
-
-    if samsung_conn:
-        import time as _time
-        _refreshed = False
-        while True:
-            try:
-                from datetime import date, timedelta
-
-                now_ms = int(_time.time() * 1000)
-                week_ago_ms = now_ms - 7 * 86400 * 1000
-
-                exercises = await samsung_health.get_exercises(
-                    samsung_conn.access_token, week_ago_ms, now_ms, limit=10
-                )
-                for exercise in exercises:
-                    update = samsung_health.exercise_to_training_plan_update(exercise)
-                    if not update["date"]:
-                        continue
-                    ex_date = date.fromisoformat(update["date"])
-                    plan_result = await db.execute(
-                        select(TrainingPlan).where(
-                            TrainingPlan.user_id == current_user.id,
-                            TrainingPlan.date == ex_date,
-                        )
-                    )
-                    plan = plan_result.scalar_one_or_none()
-                    if plan and plan.status != "completed":
-                        plan.status = "completed"
-                        if update.get("avg_hr"):
-                            plan.target_hr_min = update["avg_hr"] - 10
-                            plan.target_hr_max = update["avg_hr"] + 10
-                        synced_count += 1
-
-                sleeps = await samsung_health.get_sleep(
-                    samsung_conn.access_token, week_ago_ms, now_ms
-                )
-                if sleeps:
-                    sleep_info = samsung_health.sleep_to_metric(sleeps[-1])
-                    health_metric = HealthMetric(
-                        user_id=current_user.id,
-                        recorded_at=datetime.now(timezone.utc),
-                        sleep_duration_min=sleep_info.get("sleep_duration_min"),
-                        sleep_quality_score=sleep_info.get("sleep_quality_score"),
-                        source="samsung_health",
-                    )
-                    db.add(health_metric)
-
-                samsung_conn.last_synced_at = datetime.now(timezone.utc)
-                providers.append("samsung_health")
-                break
-            except Exception:
-                if not _refreshed and await _refresh_token_for(samsung_conn, samsung_health):
-                    _refreshed = True
-                    continue
-                break
-
-    # Google Fit-Verbindung laden (Nothing Watch, Wear OS, OnePlus Watch, ...)
-    googlefit_result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "google_fit",
-            WatchConnection.is_active == True,
-        )
-    )
-    googlefit_conn = googlefit_result.scalar_one_or_none()
-
-    if googlefit_conn:
-        import time as _time
-        _refreshed = False
-        while True:
-            try:
-                from datetime import date, timedelta
-
-                now_ms = int(_time.time() * 1000)
-                week_ago_ms = now_ms - 7 * 86400 * 1000
-
-                sessions = await google_fit.get_sessions(
-                    googlefit_conn.access_token, week_ago_ms, now_ms
-                )
-                for session in sessions:
-                    update = google_fit.session_to_training_plan_update(session)
-                    if not update["date"]:
-                        continue
-                    session_date = date.fromisoformat(update["date"])
-                    plan_result = await db.execute(
-                        select(TrainingPlan).where(
-                            TrainingPlan.user_id == current_user.id,
-                            TrainingPlan.date == session_date,
-                        )
-                    )
-                    plan = plan_result.scalar_one_or_none()
-                    if plan and plan.status != "completed":
-                        plan.status = "completed"
-                        synced_count += 1
-
-                sleep_summary = await google_fit.get_sleep_summary(
-                    googlefit_conn.access_token, week_ago_ms, now_ms
-                )
-                resting_hr = await google_fit.get_resting_heart_rate(
-                    googlefit_conn.access_token, week_ago_ms, now_ms
-                )
-                steps = await google_fit.get_daily_steps(
-                    googlefit_conn.access_token, week_ago_ms, now_ms
-                )
-
-                health_metric = HealthMetric(
-                    user_id=current_user.id,
-                    recorded_at=datetime.now(timezone.utc),
-                    sleep_duration_min=sleep_summary.get("sleep_duration_min"),
-                    resting_hr=int(resting_hr) if resting_hr else None,
-                    steps=steps or None,
-                    source="google_fit",
-                )
-                db.add(health_metric)
-
-                googlefit_conn.last_synced_at = datetime.now(timezone.utc)
-                providers.append("google_fit")
-                break
-            except Exception:
-                if not _refreshed and await _refresh_token_for(googlefit_conn, google_fit):
-                    _refreshed = True
-                    continue
-                break
-
-    if strava_conn or garmin_conn or polar_conn or wahoo_conn or fitbit_conn or suunto_conn or withings_conn or coros_conn or zepp_conn or whoop_conn or samsung_conn or googlefit_conn:
+    if any_conn:
         await db.commit()
 
     return {"synced": synced_count, "provider": providers if providers else None}
 
 
+# ─── Apple Watch / HealthKit ───────────────────────────────────────────────────
 # ─── Apple Watch / HealthKit ───────────────────────────────────────────────────
 
 
@@ -1160,6 +1080,20 @@ async def apple_health_sync(
             plan.status = "completed"
 
     await db.commit()
+
+    # Bust Redis caches so the frontend sees the new health data immediately
+    try:
+        _r = _get_redis()
+        _recovery_keys = await _r.keys(f"recovery:{current_user.id}:*")
+        if _recovery_keys:
+            await _r.delete(*_recovery_keys)
+        await _r.publish(
+            f"watch_events:{current_user.id}",
+            json.dumps({"event": "activity_synced", "provider": "apple_watch"}),
+        )
+    except Exception:
+        pass
+
     return {"ok": True, "source": "apple_watch"}
 
 
@@ -1197,8 +1131,50 @@ class ManualMetricInput(BaseModel):
     @field_validator("hrv")
     @classmethod
     def validate_hrv(cls, v: float | None) -> float | None:
-        if v is not None and (v < 0 or v > 200):
-            raise ValueError("HRV muss zwischen 0 und 200 liegen")
+        if v is not None and (v < 5 or v > 200):
+            raise ValueError("HRV muss zwischen 5 und 200 ms liegen")
+        return v
+
+    @field_validator("resting_hr")
+    @classmethod
+    def validate_resting_hr(cls, v: int | None) -> int | None:
+        if v is not None and (v < 30 or v > 120):
+            raise ValueError("Ruhepuls muss zwischen 30 und 120 bpm liegen")
+        return v
+
+    @field_validator("sleep_duration_min")
+    @classmethod
+    def validate_sleep(cls, v: int | None) -> int | None:
+        if v is not None and (v < 0 or v > 720):
+            raise ValueError("Schlafdauer muss zwischen 0 und 720 Minuten liegen")
+        return v
+
+    @field_validator("stress_score")
+    @classmethod
+    def validate_stress(cls, v: float | None) -> float | None:
+        if v is not None and (v < 0 or v > 100):
+            raise ValueError("Stresslevel muss zwischen 0 und 100 liegen")
+        return v
+
+    @field_validator("spo2")
+    @classmethod
+    def validate_spo2(cls, v: float | None) -> float | None:
+        if v is not None and (v < 70 or v > 100):
+            raise ValueError("SpO₂ muss zwischen 70 und 100 % liegen")
+        return v
+
+    @field_validator("steps")
+    @classmethod
+    def validate_steps(cls, v: int | None) -> int | None:
+        if v is not None and (v < 0 or v > 100_000):
+            raise ValueError("Schritte müssen zwischen 0 und 100.000 liegen")
+        return v
+
+    @field_validator("vo2_max")
+    @classmethod
+    def validate_vo2(cls, v: float | None) -> float | None:
+        if v is not None and (v < 10 or v > 90):
+            raise ValueError("VO₂ max muss zwischen 10 und 90 ml/kg/min liegen")
         return v
 
 
@@ -1226,195 +1202,6 @@ async def manual_input(
     return {"ok": True, "source": "manual"}
 
 
-# ─── Strava Webhooks ───────────────────────────────────────────────────────────
-
-
-class StravaWebhookEvent(BaseModel):
-    object_type: str
-    object_id: int
-    aspect_type: str
-    owner_id: int  # Strava Athlete ID
-    subscription_id: int
-    event_time: int
-
-
-@router.get("/strava/webhook")
-async def strava_webhook_verify(
-    hub_mode: str = Query(None, alias="hub.mode"),
-    hub_verify_token: str = Query(None, alias="hub.verify_token"),
-    hub_challenge: str = Query(None, alias="hub.challenge"),
-):
-    """
-    Strava Webhook Subscription Validation.
-    Strava schickt einen GET-Request zur Verifizierung des Endpoints.
-    """
-    expected_token = getattr(settings, "strava_webhook_verify_token", "trainiq_webhook")
-
-    if hub_mode == "subscribe" and secrets.compare_digest(
-        hub_verify_token or "", expected_token
-    ):
-        return {"hub.challenge": hub_challenge}
-
-    raise HTTPException(status_code=403, detail="Verification failed")
-
-
-@router.post("/strava/webhook")
-async def strava_webhook_event(
-    event: StravaWebhookEvent,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Empfängt Strava Webhook Events.
-    Bei neuen Aktivitäten wird ein Background-Task für die Verarbeitung enqueued.
-    """
-    from loguru import logger
-
-    logger.info(
-        f"Strava webhook received | type={event.aspect_type} "
-        f"obj={event.object_id} owner={event.owner_id}"
-    )
-
-    # Nur Activity-Events verarbeiten
-    if event.object_type != "activity":
-        return {"status": "ignored", "reason": "not an activity"}
-
-    # User anhand der Strava Athlete-ID direkt in SQL finden (kein Full-Table-Scan)
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.provider == "strava",
-            WatchConnection.provider_athlete_id == str(event.owner_id),
-            WatchConnection.is_active == True,
-        )
-    )
-    target_connection = result.scalar_one_or_none()
-
-    if not target_connection:
-        return {"status": "ignored", "reason": "no matching connection for owner_id"}
-
-    # Background-Task für die Verarbeitung enqueue
-    try:
-        from arq import create_pool
-        from arq.connections import RedisSettings
-        from urllib.parse import urlparse
-
-        parsed = urlparse(settings.redis_url)
-        redis_settings = RedisSettings(
-            host=parsed.hostname or "localhost",
-            port=parsed.port or 6379,
-            database=int(parsed.path.lstrip("/"))
-            if parsed.path and parsed.path != "/"
-            else 0,
-            password=parsed.password,
-        )
-
-        redis = await create_pool(redis_settings)
-        try:
-            await redis.enqueue_job(
-                "process_strava_webhook_event",
-                str(target_connection.user_id),
-                event.object_id,
-                event.aspect_type,
-                event.event_time,
-            )
-        finally:
-            await redis.close()
-    except Exception as e:
-        logger.error(f"Failed to enqueue webhook task | error={e}")
-        # Fallback: synchron verarbeiten
-        from app.worker.tasks import process_strava_webhook_event
-
-        ctx = {"redis": None}
-        try:
-            import redis.asyncio as aioredis
-
-            ctx["redis"] = aioredis.from_url(settings.redis_url)
-            await process_strava_webhook_event(
-                ctx,
-                str(target_connection.user_id),
-                event.object_id,
-                event.aspect_type,
-                event.event_time,
-            )
-        except Exception:
-            pass
-
-    return {"status": "received"}
-
-
-@router.post("/strava/webhook/subscribe")
-async def strava_webhook_subscribe(
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Registriert unseren Webhook bei Strava (einmalig nötig).
-    Strava validiert den Endpoint sofort mit einem GET-Request.
-    Callback-URL muss öffentlich erreichbar sein (kein localhost).
-    """
-    if not settings.strava_client_id:
-        raise HTTPException(status_code=503, detail="Strava nicht konfiguriert")
-
-    callback_url = f"{settings.frontend_url.rstrip('/')}/api/watch/strava/webhook"
-    # Wenn frontend_url localhost ist, schlägt die Strava-Validierung fehl
-    if "localhost" in callback_url or "127.0.0.1" in callback_url:
-        raise HTTPException(
-            status_code=400,
-            detail="Strava Webhooks benötigen eine öffentlich erreichbare URL. "
-                   "Setze FRONTEND_URL auf deine Produktions-Domain.",
-        )
-
-    # Prüfen ob bereits eine Subscription existiert
-    existing = await strava.get_webhook_subscription()
-    if existing:
-        return {
-            "status": "already_subscribed",
-            "subscription_id": existing.get("id"),
-            "callback_url": existing.get("callback_url"),
-        }
-
-    try:
-        result = await strava.subscribe_webhook(callback_url)
-        return {
-            "status": "subscribed",
-            "subscription_id": result.get("id"),
-            "callback_url": callback_url,
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Webhook-Registrierung fehlgeschlagen: {e}",
-        )
-
-
-@router.get("/strava/webhook/subscription")
-async def strava_webhook_subscription_status(
-    current_user: User = Depends(get_current_user),
-):
-    """Gibt den Status der aktuellen Strava Webhook Subscription zurück."""
-    if not settings.strava_client_id:
-        raise HTTPException(status_code=503, detail="Strava nicht konfiguriert")
-
-    subscription = await strava.get_webhook_subscription()
-    if subscription:
-        return {"active": True, "subscription": subscription}
-    return {"active": False, "subscription": None}
-
-
-@router.delete("/strava/webhook/subscription")
-async def strava_webhook_unsubscribe(
-    current_user: User = Depends(get_current_user),
-):
-    """Löscht die Strava Webhook Subscription."""
-    if not settings.strava_client_id:
-        raise HTTPException(status_code=503, detail="Strava nicht konfiguriert")
-
-    subscription = await strava.get_webhook_subscription()
-    if not subscription:
-        raise HTTPException(status_code=404, detail="Keine aktive Subscription gefunden")
-
-    await strava.delete_webhook_subscription(subscription["id"])
-    return {"status": "unsubscribed", "deleted_id": subscription["id"]}
-
-
 # ─── Datei-Upload (GPX / TCX) ─────────────────────────────────────────────────
 
 
@@ -1430,7 +1217,7 @@ async def upload_gpx(
     Polar Flow: sport.polar.com > Export GPX
     Apple Health: iOS Health App > Profil > Alle Gesundheitssdaten exportieren (dann GPX)
     """
-    import xml.etree.ElementTree as ET
+    import defusedxml.ElementTree as ET
     from datetime import date as date_type
 
     if not file.filename or not file.filename.lower().endswith((".gpx", ".tcx", ".xml")):
@@ -1443,6 +1230,8 @@ async def upload_gpx(
     try:
         root = ET.fromstring(raw.decode("utf-8", errors="replace"))
     except ET.ParseError:
+        raise HTTPException(status_code=400, detail="Ungültige XML/GPX-Datei.")
+    except Exception:
         raise HTTPException(status_code=400, detail="Ungültige XML/GPX-Datei.")
 
     # Namespace-agnostisches Element-Suchen
@@ -1534,886 +1323,134 @@ async def upload_gpx(
     }
 
 
-# ─── Polar AccessLink OAuth ────────────────────────────────────────────────────
+# ─── Datei-Import (.fit / .tcx / .gpx / .csv) ────────────────────────────────
+# Kein API-Key nötig — funktioniert mit allen Uhr-Marken die Dateien exportieren:
+# Garmin, Polar, Suunto, COROS, Zepp/Amazfit, Samsung, Wahoo, WHOOP, Apple Watch,
+# Fitbit, Withings, Oura, uvm.
+
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
-@router.get("/polar/connect")
-async def polar_connect(
+@router.post("/import/file")
+async def import_file(
+    file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
-):
-    """Polar nutzt GPX-Dateiupload — kein OAuth-Key nötig."""
-    return {"method": "file_upload", "detail": "Polar: GPX aus sport.polar.com exportieren und hochladen."}
-
-
-
-@router.get("/polar/callback")
-async def polar_callback(
-    code: str = Query(...),
-    state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Polar leitet hierher weiter nach Authorization.
-    Tauscht Code gegen Token, registriert User in AccessLink und speichert Verbindung.
+    Importiert Trainingsdaten aus einer Datei.
+    Unterstützte Formate: .fit, .tcx, .gpx, .csv
+
+    Kein API-Key nötig — User exportiert Datei direkt von der Uhr/App:
+      Garmin: Garmin Connect → Aktivität → "Original exportieren" (.fit)
+      Polar:  Polar Flow → Aktivität → Export (.tcx)
+      Suunto: Suunto App → Aktivität → "FIT-Datei exportieren" (.fit)
+      COROS:  COROS App → Aktivität → Teilen → .fit
+      Apple:  Health-App → "Alle Gesundheitsdaten exportieren" → workout.gpx
+      Fitbit: Fitbit Dashboard → fitbit.com/export → .csv
+      Zepp:   Zepp App → Profil → "Daten exportieren" → .csv
     """
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
+    filename = (file.filename or "").lower()
+    if not filename:
+        raise HTTPException(status_code=400, detail="Dateiname fehlt")
 
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
+    content = await file.read()
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Datei zu groß. Maximal {_MAX_UPLOAD_BYTES // (1024*1024)} MB erlaubt.",
+        )
 
-    try:
-        token_data = await polar.exchange_code(code)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Polar-Authentifizierung fehlgeschlagen")
-
-    polar_user_id = token_data.get("x_user_id")  # Polar liefert x_user_id im Token-Response
-
-    # User in AccessLink registrieren (einmalig, 409 = bereits registriert → ok)
-    if polar_user_id:
+    # Format erkennen
+    if filename.endswith(".fit"):
         try:
-            await polar.register_user(token_data["access_token"], polar_user_id)
+            activities = fit_importer.parse(content)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
         except Exception:
-            pass  # 409 Conflict ist kein Fehler
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "polar",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = str(polar_user_id) if polar_user_id else None
-        connection.is_active = True
+            raise HTTPException(
+                status_code=400,
+                detail="FIT-Datei konnte nicht gelesen werden. Bitte eine gültige .fit Datei hochladen.",
+            )
+    elif filename.endswith(".tcx"):
+        try:
+            activities = tcx_importer.parse(content)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    elif filename.endswith(".gpx"):
+        try:
+            activities = gpx_importer.parse(content)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    elif filename.endswith(".csv"):
+        activities = csv_importer.parse(content)
     else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="polar",
-            provider_athlete_id=str(polar_user_id) if polar_user_id else None,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
+        raise HTTPException(
+            status_code=415,
+            detail="Nicht unterstütztes Format. Bitte .fit, .tcx, .gpx oder .csv hochladen.",
         )
-        db.add(connection)
+
+    if not activities:
+        return {"imported": 0, "message": "Keine Aktivitäten in der Datei gefunden."}
+
+    from datetime import date as _date, timezone as _tz
+    import datetime as _dt
+
+    user_uuid = current_user.id
+    now_utc = _dt.datetime.now(_tz.utc)
+    imported = 0
+
+    for activity in activities:
+        if not activity.get("date"):
+            continue
+        try:
+            plan_date = _date.fromisoformat(activity["date"])
+        except (ValueError, TypeError):
+            continue
+
+        duration_min = activity.get("duration_min")
+        if not duration_min:
+            continue
+
+        pr = await db.execute(
+            select(TrainingPlan).where(
+                TrainingPlan.user_id == user_uuid,
+                TrainingPlan.date == plan_date,
+            )
+        )
+        plan = pr.scalar_one_or_none()
+        sport = activity.get("sport_type") or "other"
+        avg_hr = activity.get("avg_hr")
+
+        if plan:
+            plan.status = "completed"
+            if avg_hr:
+                plan.target_hr_min = avg_hr - 10
+                plan.target_hr_max = avg_hr + 10
+            imported += 1
+        else:
+            db.add(
+                TrainingPlan(
+                    user_id=user_uuid,
+                    date=plan_date,
+                    status="completed",
+                    sport_type=sport,
+                    duration_min=duration_min,
+                    target_hr_min=avg_hr - 10 if avg_hr else None,
+                    target_hr_max=avg_hr + 10 if avg_hr else None,
+                    notes=f"Importiert aus {filename}",
+                    created_at=now_utc,
+                    updated_at=now_utc,
+                )
+            )
+            imported += 1
 
     await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?polar=connected")
 
+    source_label = filename.rsplit(".", 1)[-1].upper()
+    return {
+        "imported": imported,
+        "total_found": len(activities),
+        "message": f"{imported} Aktivität(en) aus {source_label}-Datei importiert.",
+    }
 
-@router.post("/polar/disconnect")
-async def polar_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Polar-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "polar",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── Wahoo OAuth ───────────────────────────────────────────────────────────────
-
-
-@router.get("/wahoo/connect")
-async def wahoo_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur Wahoo OAuth2-Seite weiter."""
-    if not settings.wahoo_client_id:
-        raise HTTPException(status_code=503, detail="Wahoo nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = wahoo.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/wahoo/callback")
-async def wahoo_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """Wahoo leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await wahoo.exchange_code(code)
-        user_info = await wahoo.get_user(token_data["access_token"])
-    except Exception:
-        raise HTTPException(status_code=400, detail="Wahoo-Authentifizierung fehlgeschlagen")
-
-    wahoo_user_id = str(user_info.get("id", ""))
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "wahoo",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = wahoo_user_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="wahoo",
-            provider_athlete_id=wahoo_user_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?wahoo=connected")
-
-
-@router.post("/wahoo/disconnect")
-async def wahoo_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Wahoo-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "wahoo",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── Fitbit OAuth ──────────────────────────────────────────────────────────────
-
-
-@router.get("/fitbit/connect")
-async def fitbit_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur Fitbit OAuth2-Seite weiter."""
-    if not settings.fitbit_client_id:
-        raise HTTPException(status_code=503, detail="Fitbit nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = fitbit.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/fitbit/callback")
-async def fitbit_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """Fitbit leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await fitbit.exchange_code(code)
-        profile = await fitbit.get_profile(token_data["access_token"])
-    except Exception:
-        raise HTTPException(status_code=400, detail="Fitbit-Authentifizierung fehlgeschlagen")
-
-    fitbit_user_id = profile.get("encodedId", "")
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "fitbit",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = fitbit_user_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="fitbit",
-            provider_athlete_id=fitbit_user_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?fitbit=connected")
-
-
-@router.post("/fitbit/disconnect")
-async def fitbit_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Fitbit-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "fitbit",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── Suunto OAuth ─────────────────────────────────────────────────────────────
-
-
-@router.get("/suunto/connect")
-async def suunto_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur Suunto OAuth2-Seite weiter."""
-    if not settings.suunto_client_id:
-        raise HTTPException(status_code=503, detail="Suunto nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = suunto.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/suunto/callback")
-async def suunto_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """Suunto leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await suunto.exchange_code(code)
-        user_info = await suunto.get_user(token_data["access_token"])
-    except Exception:
-        raise HTTPException(status_code=400, detail="Suunto-Authentifizierung fehlgeschlagen")
-
-    suunto_username = user_info.get("username") or user_info.get("userId", "")
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "suunto",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = str(suunto_username)
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="suunto",
-            provider_athlete_id=str(suunto_username),
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?suunto=connected")
-
-
-@router.post("/suunto/disconnect")
-async def suunto_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Suunto-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "suunto",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── Withings OAuth ───────────────────────────────────────────────────────────
-
-
-@router.get("/withings/connect")
-async def withings_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur Withings OAuth2-Seite weiter."""
-    if not settings.withings_client_id:
-        raise HTTPException(status_code=503, detail="Withings nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = withings.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/withings/callback")
-async def withings_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """Withings leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await withings.exchange_code(code)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Withings-Authentifizierung fehlgeschlagen")
-
-    withings_user_id = str(token_data.get("userid", ""))
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "withings",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = withings_user_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="withings",
-            provider_athlete_id=withings_user_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?withings=connected")
-
-
-@router.post("/withings/disconnect")
-async def withings_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Withings-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "withings",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── COROS OAuth ──────────────────────────────────────────────────────────────
-
-
-@router.get("/coros/connect")
-async def coros_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur COROS OAuth2-Seite weiter."""
-    if not settings.coros_client_id:
-        raise HTTPException(status_code=503, detail="COROS nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = coros.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/coros/callback")
-async def coros_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """COROS leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await coros.exchange_code(code)
-    except Exception:
-        raise HTTPException(status_code=400, detail="COROS-Authentifizierung fehlgeschlagen")
-
-    open_id = token_data.get("open_id", "")
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "coros",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = open_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="coros",
-            provider_athlete_id=open_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?coros=connected")
-
-
-@router.post("/coros/disconnect")
-async def coros_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt COROS-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "coros",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── Zepp / Amazfit OAuth ──────────────────────────────────────────────────────
-
-
-@router.get("/zepp/connect")
-async def zepp_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur Zepp (Amazfit) OAuth2-Seite weiter."""
-    if not settings.zepp_client_id:
-        raise HTTPException(status_code=503, detail="Zepp/Amazfit nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = zepp.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/zepp/callback")
-async def zepp_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """Zepp leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await zepp.exchange_code(code)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Zepp-Authentifizierung fehlgeschlagen")
-
-    open_id = token_data.get("open_id", "")
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "zepp",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = open_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="zepp",
-            provider_athlete_id=open_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?zepp=connected")
-
-
-@router.post("/zepp/disconnect")
-async def zepp_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Zepp/Amazfit-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "zepp",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── WHOOP OAuth ──────────────────────────────────────────────────────────────
-
-
-@router.get("/whoop/connect")
-async def whoop_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur WHOOP OAuth2-Seite weiter."""
-    if not settings.whoop_client_id:
-        raise HTTPException(status_code=503, detail="WHOOP nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = whoop.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/whoop/callback")
-async def whoop_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """WHOOP leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await whoop.exchange_code(code)
-        profile = await whoop.get_profile(token_data["access_token"])
-    except Exception:
-        raise HTTPException(status_code=400, detail="WHOOP-Authentifizierung fehlgeschlagen")
-
-    whoop_user_id = str(profile.get("user_id", ""))
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "whoop",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = whoop_user_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="whoop",
-            provider_athlete_id=whoop_user_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?whoop=connected")
-
-
-@router.post("/whoop/disconnect")
-async def whoop_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt WHOOP-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "whoop",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── Samsung Health OAuth ───────────────────────────────────────────────────
-
-
-@router.get("/samsung/connect")
-async def samsung_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """Leitet den User zur Samsung Account OAuth2-Seite weiter."""
-    if not settings.samsung_health_client_id:
-        raise HTTPException(status_code=503, detail="Samsung Health nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = samsung_health.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/samsung/callback")
-async def samsung_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """Samsung leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await samsung_health.exchange_code(code)
-        profile = await samsung_health.get_user_profile(token_data["access_token"])
-    except Exception:
-        raise HTTPException(status_code=400, detail="Samsung-Authentifizierung fehlgeschlagen")
-
-    samsung_user_id = str(profile.get("user_id") or profile.get("userId", ""))
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "samsung_health",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", "")
-        connection.provider_athlete_id = samsung_user_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="samsung_health",
-            provider_athlete_id=samsung_user_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?samsung=connected")
-
-
-@router.post("/samsung/disconnect")
-async def samsung_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Samsung Health-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "samsung_health",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
-
-
-# ─── Google Fit / Health Connect OAuth (Nothing Watch, Wear OS, ...) ──────────────
-
-
-@router.get("/googlefit/connect")
-async def googlefit_connect(
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Leitet den User zur Google OAuth2-Seite weiter.
-    Deckt ab: Nothing Watch Pro, CMF Watch Pro, OnePlus Watch, alle Wear OS Uhren.
-    """
-    if not settings.google_fit_client_id:
-        raise HTTPException(status_code=503, detail="Google Fit nicht konfiguriert")
-
-    state = secrets.token_urlsafe(32)
-    await _store_oauth_state(state, str(current_user.id))
-    auth_url = google_fit.get_auth_url(state=state)
-    return {"auth_url": auth_url}
-
-
-@router.get("/googlefit/callback")
-async def googlefit_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """Google leitet hierher weiter nach Authorization."""
-    user_id_str = await _consume_oauth_state(state)
-    if not user_id_str:
-        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener OAuth-State")
-
-    try:
-        target_user_id = uuid_module.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Ungültige User-ID im OAuth-State")
-
-    try:
-        token_data = await google_fit.exchange_code(code)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Google-Authentifizierung fehlgeschlagen")
-
-    # Google liefert keine numeric user ID hier — sub aus id_token wäre nötig,
-    # wir speichern den Token selbst als Identifier
-    google_user_id = token_data.get("sub", "google")
-
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == target_user_id,
-            WatchConnection.provider == "google_fit",
-        )
-    )
-    connection = result.scalar_one_or_none()
-
-    if connection:
-        connection.access_token = token_data["access_token"]
-        connection.refresh_token = token_data.get("refresh_token", connection.refresh_token or "")
-        connection.provider_athlete_id = google_user_id
-        connection.is_active = True
-    else:
-        connection = WatchConnection(
-            user_id=target_user_id,
-            provider="google_fit",
-            provider_athlete_id=google_user_id,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token", ""),
-            is_active=True,
-        )
-        db.add(connection)
-
-    await db.commit()
-    return RedirectResponse(url=f"{settings.frontend_url}/onboarding?googlefit=connected")
-
-
-@router.post("/googlefit/disconnect")
-async def googlefit_disconnect(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trennt Google Fit-Verbindung."""
-    result = await db.execute(
-        select(WatchConnection).where(
-            WatchConnection.user_id == current_user.id,
-            WatchConnection.provider == "google_fit",
-        )
-    )
-    connection = result.scalar_one_or_none()
-    if connection:
-        connection.is_active = False
-        await db.commit()
-    return {"ok": True}
