@@ -1,20 +1,10 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useAuthStore } from "@/store/auth";
 
 export function useAuth() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [checked, setChecked] = useState(false);
+  const token = useAuthStore((s) => s.token);
+  const isChecked = useAuthStore((s) => s.isChecked);
+  const storeLogout = useAuthStore((s) => s.logout);
 
-  useEffect(() => {
-    setIsLoggedIn(!!localStorage.getItem("token"));
-    setChecked(true);
-  }, []);
-
-  const logout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    setIsLoggedIn(false);
-  };
-
-  return { isLoggedIn, checked, logout };
+  return { isLoggedIn: !!token, checked: isChecked, logout: storeLogout };
 }

@@ -1,4 +1,5 @@
-from datetime import date, timezone
+import asyncio
+from datetime import date, datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -20,6 +21,46 @@ class ProfileUpdateRequest(BaseModel):
     weight_kg: Optional[float] = None
     height_cm: Optional[int] = None
     preferred_language: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if len(v) < 1 or len(v) > 100:
+                raise ValueError("Name muss zwischen 1 und 100 Zeichen lang sein")
+        return v
+
+    @field_validator("preferred_language")
+    @classmethod
+    def validate_language(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in {"de", "en", "fr", "es", "it"}:
+            raise ValueError("Sprache muss eine der folgenden sein: de, en, fr, es, it")
+        return v
+
+    @field_validator("gender")
+    @classmethod
+    def validate_gender(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in {"male", "female", "other", ""}:
+            raise ValueError("Geschlecht muss 'male', 'female', 'other' oder leer sein")
+        return v or None
+
+    @field_validator("avatar_url")
+    @classmethod
+    def validate_avatar_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not (v.startswith("https://") or v.startswith("/")):
+            raise ValueError("avatar_url muss eine https:// URL oder ein relativer Pfad sein")
+        return v
+
+    @field_validator("birth_date")
+    @classmethod
+    def validate_birth_date(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            try:
+                date.fromisoformat(v)
+            except ValueError:
+                raise ValueError("Ungültiges Datumsformat. Erwartet: YYYY-MM-DD")
+        return v
 
     @field_validator("weight_kg")
     @classmethod
@@ -106,7 +147,6 @@ async def update_profile(
         current_user.preferred_language = body.preferred_language
 
     await db.flush()
-    await db.commit()
 
     return {
         "id": str(current_user.id),
@@ -126,7 +166,6 @@ async def update_profile(
 @router.get("/settings/notifications")
 async def get_notification_settings(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
     """Get user notification preferences."""
     settings = current_user.notification_settings or {
@@ -158,7 +197,6 @@ async def update_notification_settings(
         current_user.marketing_consent = body.marketing_emails
 
     await db.flush()
-    await db.commit()
 
     return current_user.notification_settings
 
@@ -174,6 +212,16 @@ class GoalsRequest(BaseModel):
     weekly_hours: int | None = None
     fitness_level: str | None = None
 
+    @field_validator("goal_description")
+    @classmethod
+    def validate_goal_description(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Ziel-Beschreibung darf nicht leer sein")
+        if len(v) > 500:
+            raise ValueError("Ziel-Beschreibung darf maximal 500 Zeichen lang sein")
+        return v
+
     @field_validator("sport")
     @classmethod
     def validate_sport(cls, v: str) -> str:
@@ -186,6 +234,16 @@ class GoalsRequest(BaseModel):
     def validate_fitness_level(cls, v: str | None) -> str | None:
         if v is not None and v not in ALLOWED_LEVELS:
             raise ValueError(f"Fitnesslevel muss einer von {ALLOWED_LEVELS} sein")
+        return v
+
+    @field_validator("target_date")
+    @classmethod
+    def validate_target_date(cls, v: str | None) -> str | None:
+        if v is not None:
+            try:
+                date.fromisoformat(v)
+            except ValueError:
+                raise ValueError("Ungültiges Datumsformat für target_date. Erwartet: YYYY-MM-DD")
         return v
 
     @field_validator("weekly_hours")
@@ -291,31 +349,24 @@ async def export_user_data(
     from app.models.training import TrainingPlan
     from app.models.watch import WatchConnection
     from app.models.nutrition import NutritionLog
-    from datetime import datetime
 
-    goals_result = await db.execute(
-        select(UserGoal).where(UserGoal.user_id == current_user.id)
+    (
+        goals_result,
+        metrics_result,
+        plans_result,
+        connections_result,
+        nutrition_result,
+    ) = await asyncio.gather(
+        db.execute(select(UserGoal).where(UserGoal.user_id == current_user.id)),
+        db.execute(select(HealthMetric).where(HealthMetric.user_id == current_user.id)),
+        db.execute(select(TrainingPlan).where(TrainingPlan.user_id == current_user.id)),
+        db.execute(select(WatchConnection).where(WatchConnection.user_id == current_user.id)),
+        db.execute(select(NutritionLog).where(NutritionLog.user_id == current_user.id)),
     )
     goals = goals_result.scalars().all()
-
-    metrics_result = await db.execute(
-        select(HealthMetric).where(HealthMetric.user_id == current_user.id)
-    )
     metrics = metrics_result.scalars().all()
-
-    plans_result = await db.execute(
-        select(TrainingPlan).where(TrainingPlan.user_id == current_user.id)
-    )
     plans = plans_result.scalars().all()
-
-    connections_result = await db.execute(
-        select(WatchConnection).where(WatchConnection.user_id == current_user.id)
-    )
     connections = connections_result.scalars().all()
-
-    nutrition_result = await db.execute(
-        select(NutritionLog).where(NutritionLog.user_id == current_user.id)
-    )
     nutrition = nutrition_result.scalars().all()
 
     export_data = {
@@ -346,6 +397,7 @@ async def export_user_data(
                 "stress_score": m.stress_score,
                 "spo2": m.spo2,
                 "steps": m.steps,
+                "vo2_max": m.vo2_max,
                 "source": m.source,
             }
             for m in metrics

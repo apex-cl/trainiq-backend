@@ -19,21 +19,21 @@ describe("RecoveryScore", () => {
   });
 
   it("shows positive message for high score", () => {
-    render(<RecoveryScore score={85} />);
+    render(<RecoveryScore score={85} dataAvailable />);
     expect(
       screen.getByText(/Intensives Training möglich/)
     ).toBeInTheDocument();
   });
 
   it("shows caution message for medium score", () => {
-    render(<RecoveryScore score={50} />);
+    render(<RecoveryScore score={50} dataAvailable />);
     expect(
       screen.getByText(/Halte die Intensität kontrolliert/)
     ).toBeInTheDocument();
   });
 
   it("shows recovery message for low score", () => {
-    render(<RecoveryScore score={20} />);
+    render(<RecoveryScore score={20} dataAvailable />);
     expect(
       screen.getByText(/Erholung wird empfohlen/)
     ).toBeInTheDocument();

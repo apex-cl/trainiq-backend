@@ -30,74 +30,77 @@ Verwende Dezimalpunkte, keine Kommas."""
         "fat_g": 65.0,
     }
 
+    @staticmethod
+    def _detect_mime_type(image_bytes: bytes) -> str:
+        """Erkennt MIME-Typ aus Magic-Bytes."""
+        if image_bytes[:4] == b"\x89PNG":
+            return "image/png"
+        if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        # JPEG und GIF fallback
+        return "image/jpeg"
+
     async def analyze_image(self, image_bytes: bytes, meal_type: str) -> dict:
         """Sendet Bild an Vision-LLM und analysiert Nährwerte."""
-        logger.info(f"Analyzing nutrition image | meal_type={meal_type}")
-        try:
-            if not settings.llm_vision_model or not settings.active_llm_api_key:
-                raise RuntimeError("Vision model not configured (LLM_VISION_MODEL)")
+        if not settings.active_llm_api_key:
+            raise RuntimeError("Kein LLM API-Key konfiguriert (LLM_API_KEY)")
 
-            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-            headers = {
-                "Authorization": f"Bearer {settings.active_llm_api_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": settings.llm_vision_model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": self.ANALYSIS_PROMPT},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_b64}"
-                                },
+        # Vision-Modell: explizit konfiguriert oder Fallback auf Standard-Modell
+        vision_model = settings.llm_vision_model or settings.llm_model
+        if not vision_model:
+            raise RuntimeError("Kein LLM-Modell konfiguriert (LLM_MODEL)")
+
+        logger.info(f"Analyzing nutrition image | meal_type={meal_type} | model={vision_model}")
+
+        mime_type = self._detect_mime_type(image_bytes)
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {settings.active_llm_api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": self.ANALYSIS_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{image_b64}"
                             },
-                        ],
-                    }
-                ],
-                "max_tokens": 512,
-            }
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 512,
+        }
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    f"{settings.llm_base_url}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-                text = data["choices"][0]["message"]["content"].strip()
-
-            # JSON aus Response parsen
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-
-            data = json.loads(text)
-            return {
-                "meal_name": data.get("meal_name", "Unbekanntes Gericht"),
-                "calories": float(data.get("calories", 0)),
-                "protein_g": float(data.get("protein_g", 0)),
-                "carbs_g": float(data.get("carbs_g", 0)),
-                "fat_g": float(data.get("fat_g", 0)),
-                "portion_notes": data.get("portion_notes", ""),
-                "confidence": data.get("confidence", "medium"),
-            }
-        except Exception as e:
-            logger.warning(
-                f"Vision API failed, using default estimates | meal_type={meal_type} | error={e}"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{settings.llm_base_url}/chat/completions",
+                headers=headers,
+                json=payload,
             )
-            return {
-                "meal_name": meal_type or "Unbekannt",
-                "calories": 400.0,
-                "protein_g": 20.0,
-                "carbs_g": 50.0,
-                "fat_g": 15.0,
-                "portion_notes": "Automatische Schätzung (Analyse fehlgeschlagen)",
-                "confidence": "low",
-            }
+            response.raise_for_status()
+            data = response.json()
+            text = data["choices"][0]["message"]["content"].strip()
+
+        # JSON aus Response parsen
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+        data = json.loads(text)
+        return {
+            "meal_name": data.get("meal_name", "Unbekanntes Gericht"),
+            "calories": float(data.get("calories", 0)),
+            "protein_g": float(data.get("protein_g", 0)),
+            "carbs_g": float(data.get("carbs_g", 0)),
+            "fat_g": float(data.get("fat_g", 0)),
+            "portion_notes": data.get("portion_notes", ""),
+            "confidence": data.get("confidence", "medium"),
+        }
 
     async def get_daily_gaps(
         self,

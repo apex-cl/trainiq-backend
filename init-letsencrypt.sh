@@ -70,13 +70,13 @@ cp ./nginx/nginx.conf ./nginx/nginx.conf.bak
 cp ./nginx/nginx-ssl-staging.conf ./nginx/nginx.conf
 
 echo ">> Nginx starten (nur HTTP für ACME-Challenge)..."
-docker compose -f docker-compose.prod.yml up -d nginx
+docker compose -f docker-compose.backend.yml up -d nginx
 
 echo ">> Warte auf Nginx..."
 sleep 5
 
 echo ">> Dummy-Zertifikat erstellen (für initiales Nginx-Start)..."
-docker compose -f docker-compose.prod.yml run --rm --entrypoint "\
+docker compose -f docker-compose.backend.yml run --rm --entrypoint "\
     sh -c 'mkdir -p /etc/letsencrypt/live/$DOMAIN && \
     openssl req -x509 -nodes -newkey rsa:4096 -days 1 \
     -keyout /etc/letsencrypt/live/$DOMAIN/privkey.pem \
@@ -84,15 +84,15 @@ docker compose -f docker-compose.prod.yml run --rm --entrypoint "\
     -subj \"/CN=localhost\"'" certbot 2>/dev/null || true
 
 echo ">> Nginx mit SSL-Ports neu starten..."
-docker compose -f docker-compose.prod.yml up -d nginx
+docker compose -f docker-compose.backend.yml up -d nginx
 sleep 3
 
 echo ">> Dummy-Zertifikat entfernen..."
-docker compose -f docker-compose.prod.yml run --rm --entrypoint "\
+docker compose -f docker-compose.backend.yml run --rm --entrypoint "\
     rm -rf /etc/letsencrypt/live/$DOMAIN" certbot 2>/dev/null || true
 
 echo ">> Let's Encrypt Zertifikat anfordern..."
-docker compose -f docker-compose.prod.yml run --rm certbot certonly \
+docker compose -f docker-compose.backend.yml run --rm certbot certonly \
     --webroot \
     --webroot-path=/var/www/certbot \
     --email "$ADMIN_EMAIL" \
@@ -106,7 +106,7 @@ cp ./nginx/nginx.conf.bak ./nginx/nginx.conf
 rm ./nginx/nginx-ssl-staging.conf
 
 echo ">> Nginx mit echtem SSL-Zertifikat neu laden..."
-docker compose -f docker-compose.prod.yml exec nginx nginx -s reload
+docker compose -f docker-compose.backend.yml exec nginx nginx -s reload
 
 echo ""
 echo "=== SSL-Initialisierung abgeschlossen ==="

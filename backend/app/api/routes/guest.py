@@ -1,16 +1,20 @@
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from app.core.database import get_db
 from app.core.config import settings
 from app.models.guest import GuestSession
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post("/session")
-async def create_guest_session(db: AsyncSession = Depends(get_db)):
+@limiter.limit("5/minute")
+async def create_guest_session(request: Request, db: AsyncSession = Depends(get_db)):
     """Erstellt eine neue Gast-Session. Gibt Session-Token zurück."""
     now = datetime.now(timezone.utc)
     expires = now + timedelta(hours=settings.guest_session_hours)

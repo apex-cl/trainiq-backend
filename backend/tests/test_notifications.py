@@ -18,7 +18,7 @@ async def test_subscribe_missing_endpoint(client, auth_headers):
         json={"keys": {"p256dh": "test", "auth": "test"}},
         headers=auth_headers,
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -29,7 +29,7 @@ async def test_subscribe_missing_keys(client, auth_headers):
         json={"endpoint": "https://example.com/push"},
         headers=auth_headers,
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

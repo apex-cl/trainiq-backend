@@ -22,7 +22,7 @@ export function useTrainingStats() {
   const query = useQuery<TrainingStats>({
     queryKey: ["training-stats"],
     queryFn: () => api.get("/training/stats").then((r) => r.data),
-    staleTime: 1000 * 60 * 10, // 10 Minuten
+    staleTime: 1000 * 60 * 30, // 30 min — stats change only on workout completion
   });
 
   return {

@@ -6,6 +6,9 @@ export default function HomePage() {
   const router = useRouter();
 
   useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
+
     const initSession = async () => {
       const token = localStorage.getItem("token");
       const guestToken = localStorage.getItem("guest_token");
@@ -18,33 +21,39 @@ export default function HomePage() {
       if (guestToken) {
         try {
           const res = await fetch(
-            `${process.env.NEXT_PUBLIC_API_URL || "http://localhost/api"}/guest/session/${guestToken}`
+            `${process.env.NEXT_PUBLIC_API_URL || "http://localhost/api"}/guest/session/${guestToken}`,
+            { signal }
           );
           if (res.ok) {
-            router.replace("/chat");
+            router.replace("/dashboard");
             return;
           }
-        } catch {}
+        } catch (err) {
+          if (err instanceof Error && err.name === "AbortError") return;
+        }
       }
 
       try {
         const res = await fetch(
           `${process.env.NEXT_PUBLIC_API_URL || "http://localhost/api"}/guest/session`,
-          { method: "POST" }
+          { method: "POST", signal }
         );
         if (res.ok) {
           const data = await res.json();
           localStorage.setItem("guest_token", data.guest_token);
-          router.replace("/chat");
-          return;
         }
-      } catch {}
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") return;
+      }
 
-      router.replace("/login");
+      // Always go to dashboard — even if guest session creation failed, never show login
+      router.replace("/dashboard");
     };
 
     initSession();
-  }, [router]);
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center">

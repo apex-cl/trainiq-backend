@@ -40,7 +40,7 @@ export function TodayWorkout({
         href="/training"
         className="block w-full border border-border text-textDim text-xs tracking-widest uppercase font-sans py-2.5 text-center hover:border-blue hover:text-blue transition-colors"
       >
-        Details anzeigen ──→
+        Details anzeigen →
       </Link>
     </div>
   );

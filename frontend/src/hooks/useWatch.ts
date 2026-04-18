@@ -1,6 +1,7 @@
 "use client";
 import { useState, useCallback, useEffect } from "react";
 import api from "@/lib/api";
+import { useWatchRealtime } from "@/hooks/useWatchRealtime";
 
 export interface WatchConnection {
   provider: string;
@@ -9,8 +10,9 @@ export interface WatchConnection {
 
 export interface WatchStatus {
   connected: WatchConnection[];
-  strava_available: boolean;
   garmin_available: boolean;
+  strava_available: boolean;
+  apple_watch_available: boolean;
 }
 
 export function useWatch() {
@@ -33,24 +35,6 @@ export function useWatch() {
 
   useEffect(() => {
     fetchStatus();
-  }, [fetchStatus]);
-
-  const connectStrava = useCallback(async () => {
-    try {
-      const { data } = await api.get<{ auth_url: string }>("/watch/strava/connect");
-      window.location.href = data.auth_url;
-    } catch (e) {
-      setError("Strava-Verbindung fehlgeschlagen");
-    }
-  }, []);
-
-  const disconnectStrava = useCallback(async () => {
-    try {
-      await api.post("/watch/strava/disconnect");
-      await fetchStatus();
-    } catch (e) {
-      setError("Trennung fehlgeschlagen");
-    }
   }, [fetchStatus]);
 
   const connectGarmin = useCallback(async () => {
@@ -84,6 +68,22 @@ export function useWatch() {
     }
   }, []);
 
+  // Echtzeit: last_synced_at aktualisieren wenn neues Event eintrifft
+  const { lastEvent } = useWatchRealtime();
+  useEffect(() => {
+    if (!lastEvent || lastEvent.event !== "activity_synced" || !lastEvent.provider) return;
+    const now = new Date().toISOString();
+    setStatus((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        connected: prev.connected.map((c) =>
+          c.provider === lastEvent.provider ? { ...c, last_synced_at: now } : c
+        ),
+      };
+    });
+  }, [lastEvent]);
+
   const manualInput = useCallback(async (metrics: {
     hrv?: number;
     resting_hr?: number;
@@ -104,8 +104,6 @@ export function useWatch() {
     loading,
     error,
     refetch: fetchStatus,
-    connectStrava,
-    disconnectStrava,
     connectGarmin,
     disconnectGarmin,
     sync,

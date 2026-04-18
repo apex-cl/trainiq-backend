@@ -38,6 +38,7 @@ class HealthMetric(Base):
     stress_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     spo2: Mapped[float | None] = mapped_column(Float, nullable=True)
     steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    vo2_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String, default="manual")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

@@ -1,8 +1,10 @@
+import asyncio
+import uuid as uuid_module
 from datetime import datetime, timezone
 from typing import Union
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update, func, cast, Date as SADate
 import cloudinary
 import cloudinary.uploader
 from slowapi import Limiter
@@ -73,32 +75,61 @@ async def upload(
 
     image_bytes = await file.read()
 
-    # 3. Magic-Bytes validieren (verhindert Content-Type-Spoofing)
+    # 3. Dateigröße prüfen (max 10 MB)
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Datei zu groß (max 10 MB)")
+
+    # 4. Magic-Bytes validieren (verhindert Content-Type-Spoofing)
     if not _is_valid_image(image_bytes):
         raise HTTPException(status_code=400, detail="Ungültiges Bildformat")
     user_id = current.id if not is_guest else f"guest:{current.id}"
 
-    # 4. Bild zu Cloudinary hochladen (nur wenn Key konfiguriert)
-    image_url = None
-    if settings.cloudinary_api_key:
+    # 4+5. Cloudinary-Upload und KI-Analyse parallel – beide brauchen nur image_bytes
+    async def _maybe_upload() -> str | None:
+        if not settings.cloudinary_api_key:
+            return None
         try:
-            result = cloudinary.uploader.upload(
+            result = await asyncio.to_thread(
+                cloudinary.uploader.upload,
                 image_bytes,
                 folder=f"trainiq/{user_id}",
                 resource_type="image",
             )
-            image_url = result.get("secure_url")
+            return result.get("secure_url")
         except Exception as e:
             logger.warning(f"Cloudinary upload failed | user={user_id} | error={e}")
+            return None
 
-    # 5. Bild analysieren
     analyzer = NutritionAnalyzer()
-    analysis = await analyzer.analyze_image(image_bytes, meal_type)
+    try:
+        image_url, analysis = await asyncio.gather(
+            _maybe_upload(),
+            analyzer.analyze_image(image_bytes, meal_type),
+        )
+    except Exception as e:
+        logger.error(f"Nutrition photo analysis failed | user={user_id} | error={e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Bild-Analyse fehlgeschlagen. Bitte versuche es erneut.",
+        )
 
-    # 6. Gast-Counter NACH erfolgreicher Analyse inkrementieren
+    # 6. Gast-Counter NACH erfolgreicher Analyse atomar inkrementieren (verhindert Race-Condition)
     if is_guest:
-        current.photo_count += 1
+        res = await db.execute(
+            update(GuestSession)
+            .where(
+                GuestSession.id == current.id,
+                GuestSession.photo_count < settings.guest_max_photos,
+            )
+            .values(photo_count=GuestSession.photo_count + 1)
+        )
         await db.commit()
+        if res.rowcount == 0:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Gast-Limit erreicht ({settings.guest_max_photos} Fotos). Bitte registrieren für mehr.",
+            )
+        new_count = current.photo_count + 1
         return {
             "meal_name": analysis["meal_name"],
             "calories": analysis["calories"],
@@ -107,7 +138,7 @@ async def upload(
             "fat_g": analysis["fat_g"],
             "image_url": image_url,
             "confidence": analysis["confidence"],
-            "photos_remaining": settings.guest_max_photos - current.photo_count,
+            "photos_remaining": settings.guest_max_photos - new_count,
         }
 
     # In DB speichern (nur für registrierte User)
@@ -142,39 +173,47 @@ async def get_today(
     db: AsyncSession = Depends(get_db),
 ):
     """Return today's total nutrition values and individual meal logs."""
+    from app.models.training import UserGoal
+    from app.services.nutrition_targets import NutritionTargetCalculator
+
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
 
-    result = await db.execute(
-        select(NutritionLog)
-        .where(
-            NutritionLog.user_id == current_user.id,
-            NutritionLog.logged_at >= today_start,
-        )
-        .order_by(NutritionLog.logged_at.desc())
+    # All 3 queries in parallel
+    logs_result, totals_result, goals_result = await asyncio.gather(
+        db.execute(
+            select(NutritionLog)
+            .where(
+                NutritionLog.user_id == current_user.id,
+                NutritionLog.logged_at >= today_start,
+            )
+            .order_by(NutritionLog.logged_at.desc())
+        ),
+        db.execute(
+            select(
+                func.coalesce(func.sum(NutritionLog.calories), 0).label("cal"),
+                func.coalesce(func.sum(NutritionLog.protein_g), 0).label("protein"),
+                func.coalesce(func.sum(NutritionLog.carbs_g), 0).label("carbs"),
+                func.coalesce(func.sum(NutritionLog.fat_g), 0).label("fat"),
+            ).where(
+                NutritionLog.user_id == current_user.id,
+                NutritionLog.logged_at >= today_start,
+            )
+        ),
+        db.execute(
+            select(UserGoal).where(UserGoal.user_id == current_user.id).limit(1)
+        ),
     )
-    logs = result.scalars().all()
 
-    total_calories = sum(l.calories or 0 for l in logs)
-    total_protein = sum(l.protein_g or 0 for l in logs)
-    total_carbs = sum(l.carbs_g or 0 for l in logs)
-    total_fat = sum(l.fat_g or 0 for l in logs)
+    logs = logs_result.scalars().all()
+    row = totals_result.one()
+    total_calories, total_protein, total_carbs, total_fat = row.cal, row.protein, row.carbs, row.fat
 
-    # Personalisierte Ziele laden
-    from app.models.training import UserGoal
-    from app.services.nutrition_targets import NutritionTargetCalculator
-
-    goals_result = await db.execute(
-        select(UserGoal).where(UserGoal.user_id == current_user.id)
-    )
-    goals = goals_result.scalars().all()
     calc = NutritionTargetCalculator()
-    if goals:
-        g = goals[0]
-        targets = calc.calculate(
-            g.sport, g.weekly_hours or 5, g.fitness_level or "intermediate"
-        )
+    goal = goals_result.scalars().first()
+    if goal:
+        targets = calc.calculate(goal.sport, goal.weekly_hours or 5, goal.fitness_level or "intermediate")
     else:
         targets = calc.default_targets()
 
@@ -219,19 +258,24 @@ async def get_gaps(
         hour=0, minute=0, second=0, microsecond=0
     )
 
+    # Direkt aggregieren – keine Row-Objekte laden
     result = await db.execute(
-        select(NutritionLog).where(
+        select(
+            func.coalesce(func.sum(NutritionLog.calories), 0).label("cal"),
+            func.coalesce(func.sum(NutritionLog.protein_g), 0).label("protein"),
+            func.coalesce(func.sum(NutritionLog.carbs_g), 0).label("carbs"),
+            func.coalesce(func.sum(NutritionLog.fat_g), 0).label("fat"),
+        ).where(
             NutritionLog.user_id == current_user.id,
             NutritionLog.logged_at >= today_start,
         )
     )
-    logs = result.scalars().all()
-
+    row = result.one()
     totals = {
-        "calories": sum(l.calories or 0 for l in logs),
-        "protein_g": sum(l.protein_g or 0 for l in logs),
-        "carbs_g": sum(l.carbs_g or 0 for l in logs),
-        "fat_g": sum(l.fat_g or 0 for l in logs),
+        "calories": float(row.cal),
+        "protein_g": float(row.protein),
+        "carbs_g": float(row.carbs),
+        "fat_g": float(row.fat),
     }
 
     analyzer = NutritionAnalyzer()
@@ -278,43 +322,35 @@ async def get_history(
     days = min(days, 30)  # Maximal 30 Tage
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
+    # GROUP BY direkt in SQL – kein Python-seitiges dict-Building
     result = await db.execute(
-        select(NutritionLog)
+        select(
+            cast(NutritionLog.logged_at, SADate).label("day"),
+            func.round(func.coalesce(func.sum(NutritionLog.calories), 0), 1).label("total_calories"),
+            func.round(func.coalesce(func.sum(NutritionLog.protein_g), 0), 1).label("total_protein_g"),
+            func.round(func.coalesce(func.sum(NutritionLog.carbs_g), 0), 1).label("total_carbs_g"),
+            func.round(func.coalesce(func.sum(NutritionLog.fat_g), 0), 1).label("total_fat_g"),
+            func.count(NutritionLog.id).label("meal_count"),
+        )
         .where(
             NutritionLog.user_id == current_user.id,
             NutritionLog.logged_at >= start,
         )
-        .order_by(NutritionLog.logged_at.desc())
+        .group_by(cast(NutritionLog.logged_at, SADate))
+        .order_by(cast(NutritionLog.logged_at, SADate).desc())
     )
-    logs = result.scalars().all()
-
-    # Nach Tag gruppieren
-    by_date: dict[str, dict] = {}
-    for l in logs:
-        date_key = l.logged_at.date().isoformat()
-        if date_key not in by_date:
-            by_date[date_key] = {
-                "date": date_key,
-                "total_calories": 0,
-                "total_protein_g": 0,
-                "total_carbs_g": 0,
-                "total_fat_g": 0,
-                "meal_count": 0,
-            }
-        by_date[date_key]["total_calories"] += l.calories or 0
-        by_date[date_key]["total_protein_g"] += l.protein_g or 0
-        by_date[date_key]["total_carbs_g"] += l.carbs_g or 0
-        by_date[date_key]["total_fat_g"] += l.fat_g or 0
-        by_date[date_key]["meal_count"] += 1
-
-    # Runden
-    for d in by_date.values():
-        d["total_calories"] = round(d["total_calories"], 1)
-        d["total_protein_g"] = round(d["total_protein_g"], 1)
-        d["total_carbs_g"] = round(d["total_carbs_g"], 1)
-        d["total_fat_g"] = round(d["total_fat_g"], 1)
-
-    return list(by_date.values())
+    rows = result.all()
+    return [
+        {
+            "date": row.day.isoformat(),
+            "total_calories": float(row.total_calories),
+            "total_protein_g": float(row.total_protein_g),
+            "total_carbs_g": float(row.total_carbs_g),
+            "total_fat_g": float(row.total_fat_g),
+            "meal_count": row.meal_count,
+        }
+        for row in rows
+    ]
 
 
 @router.delete("/meal/{meal_id}")
@@ -324,8 +360,6 @@ async def delete_meal(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a specific nutrition log entry."""
-    import uuid as uuid_module
-
     try:
         meal_uuid = uuid_module.UUID(meal_id)
     except ValueError:
@@ -342,5 +376,5 @@ async def delete_meal(
         raise HTTPException(status_code=404, detail="Mahlzeit nicht gefunden")
 
     await db.delete(meal)
-    await db.commit()
-    return {"ok": True, "deleted_id": meal_id}
+    await db.flush()
+    return {"ok": True}

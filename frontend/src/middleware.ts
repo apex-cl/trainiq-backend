@@ -1,11 +1,22 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-// next-intl Middleware deaktiviert — Locale-Routing wird clientseitig gehandhabt
 export function middleware(request: NextRequest) {
-  // Force 200 with marker header to confirm this code runs
   const response = NextResponse.next();
-  response.headers.set("x-mw-ran", "1");
+
+  // Security headers (complements nginx headers; also active in dev without nginx)
+  response.headers.set("X-Content-Type-Options", "nosniff");
+  response.headers.set("X-Frame-Options", "SAMEORIGIN");
+  response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  response.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  response.headers.set("X-DNS-Prefetch-Control", "on");
+
+  // Forward correlation ID if present
+  const reqId = request.headers.get("x-request-id");
+  if (reqId) {
+    response.headers.set("x-request-id", reqId);
+  }
+
   return response;
 }
 

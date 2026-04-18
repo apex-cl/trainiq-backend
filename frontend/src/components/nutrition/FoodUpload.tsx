@@ -15,6 +15,8 @@ export function FoodUpload({
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    // Input sofort zurücksetzen damit dieselbe Datei erneut ausgewählt werden kann
+    e.target.value = "";
     if (!file) {
       setError("Keine Datei ausgewählt.");
       return;
@@ -41,8 +43,8 @@ export function FoodUpload({
       >
         {uploading ? (
           <div className="flex flex-col items-center gap-2">
-            <span className="font-pixel text-blue text-2xl animate-pulse">SPINNER</span>
-            <span className="text-[10px] font-mono text-blue animate-bounce">UPLOADING...</span>
+            <div className="w-6 h-6 border-2 border-blue border-t-transparent rounded-full animate-spin" />
+            <span className="text-[10px] font-mono text-blue tracking-widest uppercase">ANALYSIERE...</span>
           </div>
         ) : (
           <>

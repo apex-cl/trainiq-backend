@@ -47,7 +47,7 @@ python -m pytest tests/ -v
 
 ```bash
 # .env anpassen: DEV_MODE=false, JWT_SECRET auf sicheren Wert setzen
-docker compose -f docker-compose.prod.yml up --build -d
+docker compose -f docker-compose.backend.yml up --build -d
 ```
 
 ## Architektur

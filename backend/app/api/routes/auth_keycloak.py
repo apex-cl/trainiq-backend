@@ -16,6 +16,8 @@ from app.services.jwt_service import jwt_service
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 
+ALLOWED_SOCIAL_PROVIDERS = {"google", "github", "apple"}
+
 
 class TokenExchangeRequest(BaseModel):
     code: str
@@ -28,6 +30,19 @@ class RefreshTokenRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str
+
+
+@router.get("/social/{provider}")
+async def social_login(provider: str):
+    """Redirect to a specific social identity provider via Keycloak."""
+    if not settings.keycloak_enabled:
+        raise HTTPException(status_code=400, detail="Keycloak is not enabled.")
+    if provider not in ALLOWED_SOCIAL_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Unbekannter Anbieter.")
+    state = secrets.token_urlsafe(32)
+    redirect_uri = f"{settings.frontend_url}/api/auth/callback"
+    auth_url = keycloak_service.get_social_login_url(provider, redirect_uri, state)
+    return {"auth_url": auth_url, "state": state}
 
 
 @router.get("/login")
@@ -56,12 +71,21 @@ async def register():
 
 @router.post("/callback")
 @limiter.limit("10/minute")
-async def callback(http_request: Request, request: TokenExchangeRequest, db: AsyncSession = Depends(get_db)):
+async def callback(request: Request, body: TokenExchangeRequest, db: AsyncSession = Depends(get_db)):
     if not settings.keycloak_enabled:
         raise HTTPException(status_code=400, detail="Keycloak is not enabled.")
 
+    # Validate redirect_uri comes from our own frontend (prevents open redirect / token theft)
+    allowed_prefixes = (
+        settings.frontend_url,
+        "http://localhost",
+        "http://localhost:3000",
+    )
+    if not any(body.redirect_uri.startswith(p) for p in allowed_prefixes):
+        raise HTTPException(status_code=400, detail="Ungültige redirect_uri")
+
     token_data = await keycloak_service.exchange_code(
-        request.code, request.redirect_uri
+        body.code, body.redirect_uri
     )
     if not token_data:
         raise HTTPException(
@@ -114,11 +138,11 @@ async def callback(http_request: Request, request: TokenExchangeRequest, db: Asy
 
 @router.post("/refresh")
 @limiter.limit("10/minute")
-async def refresh(http_request: Request, request: RefreshTokenRequest):
+async def refresh(request: Request, body: RefreshTokenRequest):
     if not settings.keycloak_enabled:
         raise HTTPException(status_code=400, detail="Keycloak is not enabled.")
 
-    token_data = await keycloak_service.refresh_token(request.refresh_token)
+    token_data = await keycloak_service.refresh_token(body.refresh_token)
     if not token_data:
         raise HTTPException(status_code=400, detail="Failed to refresh token")
 
@@ -132,11 +156,11 @@ async def refresh(http_request: Request, request: RefreshTokenRequest):
 
 @router.post("/logout")
 async def logout(
-    request: LogoutRequest,
+    body: LogoutRequest,
     current_user: User = Depends(get_current_user),
 ):
     if settings.keycloak_enabled:
-        await keycloak_service.logout(request.refresh_token)
+        await keycloak_service.logout(body.refresh_token)
 
     return {"ok": True, "message": "Erfolgreich abgemeldet."}
 

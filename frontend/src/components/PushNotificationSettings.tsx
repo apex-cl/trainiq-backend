@@ -1,15 +1,17 @@
 "use client";
 import { usePushNotifications } from "@/hooks/usePushNotifications";
+import { useI18n } from "@/hooks/useI18n";
 import { Bell, BellOff } from "lucide-react";
 
 export function PushNotificationSettings() {
   const { permission, subscribed, loading, subscribe, unsubscribe, supported } = usePushNotifications();
+  const { t } = useI18n();
 
   if (!supported) return null;
 
   return (
     <div className="px-5 py-5 border-b border-border">
-      <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-4">Benachrichtigungen</p>
+      <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-4">{t("settings.notifications")}</p>
       {loading ? (
         <div className="h-12 bg-[#EBEBEB] animate-pulse" />
       ) : (
@@ -19,7 +21,7 @@ export function PushNotificationSettings() {
             <div>
               <p className="text-xs tracking-widest uppercase font-sans text-textMain">Push</p>
               <p className={`text-xs font-sans mt-0.5 ${subscribed ? "text-blue" : "text-textDim"}`}>
-                {subscribed ? "● Aktiviert" : permission === "denied" ? "● Blockiert im Browser" : "○ Deaktiviert"}
+                {subscribed ? `● ${t("settings.pushEnabled")}` : permission === "denied" ? `● ${t("settings.pushBlocked")}` : `○ ${t("settings.pushDisabled")}`}
               </p>
             </div>
           </div>
@@ -32,13 +34,13 @@ export function PushNotificationSettings() {
                   : "border-blue text-blue hover:bg-blueDim"
               }`}
             >
-              {subscribed ? "Deaktivieren" : "Aktivieren"}
+              {subscribed ? t("settings.disablePush") : t("settings.enablePush")}
             </button>
           )}
         </div>
       )}
       <p className="text-[10px] font-sans text-textDim mt-2 leading-relaxed">
-        Erhalte Erinnerungen an dein Workout und Updates zu deinem Trainingsplan.
+        {t("settings.pushDesc")}
       </p>
     </div>
   );

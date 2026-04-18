@@ -1,5 +1,5 @@
 "use client";
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useCoach } from "@/hooks/useCoach";
 import { useRouter } from "next/navigation";
 import api from "@/lib/api";
@@ -14,10 +14,31 @@ const SUGGESTIONS = [
   "Was sollte ich vor dem Training essen?"
 ];
 
+function formatContent(text: string): string {
+  if (!text) return "";
+  const html = text
+    .replace(/^### (.+)$/gm, '<div class="text-xs font-sans font-bold uppercase tracking-wider text-blue mt-2 mb-1">$1</div>')
+    .replace(/^## (.+)$/gm, '<div class="text-sm font-sans font-bold uppercase tracking-wider text-blue border-b border-border pb-1 mt-3 mb-1">$1</div>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong class="font-bold text-textMain">$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em class="italic text-textDim">$1</em>')
+    .replace(/^[-•] (.+)$/gm, '<div class="flex gap-2 ml-2"><span class="text-blue shrink-0">›</span><span>$1</span></div>')
+    .replace(/^(\d+)\. (.+)$/gm, '<div class="flex gap-2 ml-2"><span class="text-blue font-bold shrink-0">$1.</span><span>$2</span></div>')
+    .replace(/^---$/gm, '<hr class="border-border my-2" />')
+    .replace(/\n/g, '<br />');
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ['span', 'b', 'i', 'em', 'strong', 'p', 'br', 'ul', 'ol', 'li', 'div', 'hr'],
+    ALLOWED_ATTR: ['class', 'style'],
+  });
+}
+
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+}
+
 
 export default function ChatPage() {
   const router = useRouter();
-  const { messages, loading, historyLoading, isError, sendMessage, sendImage, guestLimits } = useCoach();
+  const { messages, loading, historyLoading, isError, sendMessage, sendImage, guestLimits, clearMessages } = useCoach();
   const [input, setInput] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
@@ -38,7 +59,7 @@ export default function ChatPage() {
   }, [guestLimits]);
 
   const handleSend = () => {
-    if (!input.trim() || loading || input.length > 1000) return;
+    if (!input.trim() || loading || input.length > 2000) return;
     if (guestLimits.isGuest && guestLimits.messagesRemaining === 0) {
       setShowUpgradePrompt(true);
       return;
@@ -53,24 +74,14 @@ export default function ChatPage() {
     setDeleteError(false);
     try {
       await api.delete("/coach/history");
-      window.location.reload();
+      clearMessages();
+      setShowDeleteConfirm(false);
     } catch {
       setDeleteError(true);
       setShowDeleteConfirm(false);
       setTimeout(() => setDeleteError(false), 3000);
     }
   };
-
-  const formatContent = (text: string) => {
-    const formatted = text.replace(/\*\*(.+?)\*\*/g, '<span class="font-pixel text-blue" style="font-size:18px">$1</span>');
-    return DOMPurify.sanitize(formatted, {
-      ALLOWED_TAGS: ['span', 'b', 'i', 'em', 'strong', 'p', 'br', 'ul', 'ol', 'li'],
-      ALLOWED_ATTR: ['class', 'style'],
-    });
-  };
-
-  const formatTime = (iso: string) =>
-    new Date(iso).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 
   const limitReached = guestLimits.isGuest && guestLimits.messagesRemaining === 0;
 
@@ -155,7 +166,7 @@ export default function ChatPage() {
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4 pb-4" style={{ paddingBottom: 160 }}>
+      <div className="flex-1 overflow-y-auto px-4 pt-4 flex flex-col gap-4 bg-bg" style={{ paddingBottom: 170 }}>
         {historyLoading && <ChatLoadingSkeleton />}
 
         {messages.length === 0 && !historyLoading && (
@@ -166,7 +177,7 @@ export default function ChatPage() {
              </p>
              <div className="flex flex-col gap-2">
                 {SUGGESTIONS.map(s => (
-                  <button key={s} onClick={() => setInput(s)} className="text-left border border-border px-3 py-2 text-xs font-sans text-textMain hover:border-blue transition-colors">
+                  <button key={s} onClick={() => { if (!loading && !limitReached) { sendMessage(s); } }} disabled={loading || limitReached} className="text-left border border-border px-3 py-2 text-xs font-sans text-textMain hover:border-blue transition-colors disabled:opacity-40">
                     › {s}
                   </button>
                 ))}
@@ -196,7 +207,15 @@ export default function ChatPage() {
             <div className={`max-w-[80%] ${msg.role === "user" ? "items-end" : "items-start"} flex flex-col`}>
               <div className={`border p-3 text-sm font-sans leading-relaxed ${msg.role === "assistant" ? "border-border bg-surface text-textMain" : "border-border text-textMain"}`}>
                 {msg.role === "assistant" ? (
-                  <span dangerouslySetInnerHTML={{ __html: formatContent(msg.content) }} />
+                  msg.content === "" ? (
+                    <span className="inline-flex gap-1">
+                      <span className="animate-bounce">.</span>
+                      <span className="animate-bounce delay-100">.</span>
+                      <span className="animate-bounce delay-200">.</span>
+                    </span>
+                  ) : (
+                    <span dangerouslySetInnerHTML={{ __html: formatContent(msg.content) }} />
+                  )
                 ) : (
                   msg.content
                 )}
@@ -206,20 +225,6 @@ export default function ChatPage() {
           </div>
         ))}
 
-        {loading && (
-          <div className="flex gap-3 items-start fade-up">
-            <div className="w-7 h-7 border border-border flex items-center justify-center shrink-0 mt-0.5">
-              <span className="font-pixel text-blue text-xs">C</span>
-            </div>
-            <div className="border border-border p-3 bg-surface">
-              <span className="inline-flex gap-1">
-                <span className="animate-bounce">.</span>
-                <span className="animate-bounce delay-100">.</span>
-                <span className="animate-bounce delay-200">.</span>
-              </span>
-            </div>
-          </div>
-        )}
         <div ref={bottomRef} />
       </div>
 
@@ -251,9 +256,9 @@ export default function ChatPage() {
               className="flex-1 bg-transparent text-sm font-sans text-textMain placeholder-textDim outline-none disabled:opacity-50"
             />
             <span className="cursor-blink text-blue font-mono text-sm">_</span>
-            {input.length > 900 && (
+            {input.length > 1800 && (
               <span className="text-[10px] font-sans text-danger shrink-0">
-                {1000 - input.length}
+                {2000 - input.length}
               </span>
             )}
           </div>

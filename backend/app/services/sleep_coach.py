@@ -12,6 +12,17 @@ from app.models.user import User
 from app.models.conversation import Conversation
 from app.models.metrics import HealthMetric
 
+# Singleton HTTP-Client: ein TCP-Pool für alle LLM-Aufrufe im Worker.
+# Verhindert neuen TLS-Handshake für jeden User bei Scheduler-Jobs.
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=45.0)
+    return _http_client
+
 
 async def _call_llm(prompt: str) -> str:
     """Einfacher LLM-Aufruf ohne Streaming."""
@@ -27,16 +38,16 @@ async def _call_llm(prompt: str) -> str:
         "max_tokens": 512,
         "temperature": 0.7,
     }
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        response = await client.post(
-            f"{settings.llm_base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-        data = response.json()
-        msg = data["choices"][0]["message"]
-        return (msg.get("content") or msg.get("reasoning") or "").strip()
+    client = _get_http_client()
+    response = await client.post(
+        f"{settings.llm_base_url}/chat/completions",
+        headers=headers,
+        json=payload,
+    )
+    response.raise_for_status()
+    data = response.json()
+    msg = data["choices"][0]["message"]
+    return (msg.get("content") or msg.get("reasoning") or "").strip()
 
 
 async def send_evening_sleep_tips():
@@ -48,7 +59,12 @@ async def send_evening_sleep_tips():
 
     async with async_session() as db:
         try:
-            result = await db.execute(select(User))
+            result = await db.execute(
+                select(User).where(
+                    User.email.isnot(None),
+                    User.email.contains("@"),
+                )
+            )
             users = result.scalars().all()
             sent = 0
 
@@ -76,7 +92,7 @@ async def send_evening_sleep_tips():
 
 Nutzer-Kontext:
 - Durchschnittlicher Schlaf letzte Tage: {f"{sleep_hours}h" if latest_metrics else "unbekannt"}
-- Aktueller Wochentag: {__import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%A")}
+- Aktueller Wochentag: {datetime.now(timezone.utc).strftime("%A")}
 
 Regeln:
 - 2-3 Sätze maximal
@@ -136,7 +152,12 @@ async def send_morning_health_feedback():
 
     async with async_session() as db:
         try:
-            result = await db.execute(select(User))
+            result = await db.execute(
+                select(User).where(
+                    User.email.isnot(None),
+                    User.email.contains("@"),
+                )
+            )
             users = result.scalars().all()
             sent = 0
 

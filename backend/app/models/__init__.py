@@ -5,7 +5,7 @@ from app.models.metrics import HealthMetric, DailyWellbeing, RecoveryScore
 from app.models.nutrition import NutritionLog
 from app.models.conversation import Conversation
 from app.models.watch import WatchConnection
-from app.models.ai_memory import AIMemory, PasswordResetToken, StravaWebhookSubscription
+from app.models.ai_memory import AIMemory, PasswordResetToken
 
 __all__ = [
     "User",
@@ -19,5 +19,4 @@ __all__ = [
     "WatchConnection",
     "AIMemory",
     "PasswordResetToken",
-    "StravaWebhookSubscription",
 ]

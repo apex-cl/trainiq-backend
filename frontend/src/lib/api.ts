@@ -1,12 +1,14 @@
 import axios from "axios";
+import { useAuthStore } from "@/store/auth";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost/api",
+  timeout: 30000, // 30s — prevents UI from hanging on unresponsive backend
 });
 
 api.interceptors.request.use((config) => {
   if (typeof window !== "undefined") {
-    const token = localStorage.getItem("token");
+    const token = useAuthStore.getState().token;
     const guestToken = localStorage.getItem("guest_token");
 
     if (token) {
@@ -27,11 +29,10 @@ api.interceptors.response.use(
       !window.location.pathname.startsWith("/login") &&
       !window.location.pathname.startsWith("/register")
     ) {
-      // Nur redirecten wenn kein Gast-Token
+      // Only redirect when not a guest session
       const guestToken = localStorage.getItem("guest_token");
       if (!guestToken) {
-        localStorage.removeItem("token");
-        localStorage.removeItem("user");
+        useAuthStore.getState().logout();
         window.location.href = "/login";
       }
     }

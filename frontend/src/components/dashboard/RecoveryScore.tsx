@@ -2,10 +2,14 @@ export function RecoveryScore({
   score,
   label,
   loading,
+  hasHrv,
+  dataAvailable,
 }: {
   score: number;
   label?: string;
   loading?: boolean;
+  hasHrv?: boolean;
+  dataAvailable?: boolean;
 }) {
   const scoreColor = loading
     ? "text-textDim"
@@ -50,11 +54,15 @@ export function RecoveryScore({
           ? "Analysiere Biometrie..."
           : score === 0
             ? "Verbinde eine Uhr oder erfasse Metriken manuell."
-            : score >= 70
-              ? "HRV liegt über deinem Durchschnitt. Intensives Training möglich."
-              : score >= 40
-                ? "Moderate Werte. Halte die Intensität kontrolliert."
-                : "Niedrige Werte. Erholung wird empfohlen."}
+            : !dataAvailable
+              ? "Score basiert auf Standard-Werten — sync deine Uhr für echte Biometrie."
+              : score >= 70
+                ? hasHrv
+                  ? "HRV liegt über deinem Durchschnitt. Intensives Training möglich."
+                  : "Erholungswerte im grünen Bereich. Intensives Training möglich."
+                : score >= 40
+                  ? "Moderate Werte. Halte die Intensität kontrolliert."
+                  : "Niedrige Werte. Erholung wird empfohlen."}
       </p>
     </div>
   );

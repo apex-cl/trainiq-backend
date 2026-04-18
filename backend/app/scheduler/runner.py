@@ -2,6 +2,8 @@ import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.scheduler.jobs import (
     sync_watch_data_for_all_users,
+    sync_oauth_providers_for_all_users,
+    sync_garmin_for_all_users,
     generate_tomorrow_plans,
     autonomous_monitor_job,
     send_sleep_tips_job,
@@ -13,8 +15,22 @@ scheduler = AsyncIOScheduler()
 scheduler.add_job(
     sync_watch_data_for_all_users,
     "interval",
-    hours=4,
+    hours=1,
     id="watch_sync",
+    replace_existing=True,
+)
+scheduler.add_job(
+    sync_oauth_providers_for_all_users,
+    "interval",
+    hours=1,
+    id="oauth_sync",
+    replace_existing=True,
+)
+scheduler.add_job(
+    sync_garmin_for_all_users,
+    "interval",
+    hours=1,
+    id="garmin_sync",
     replace_existing=True,
 )
 scheduler.add_job(

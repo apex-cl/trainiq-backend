@@ -8,7 +8,7 @@ export function ChatInput({
   onSend,
   onImage,
   disabled,
-  maxLength = 1000,
+  maxLength = 2000,
 }: {
   value: string;
   onChange: (val: string) => void;
@@ -27,7 +27,12 @@ export function ChatInput({
           <input
             value={value}
             onChange={(e) => onChange(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && onSend()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                onSend();
+              }
+            }}
             placeholder="Nachricht..."
             disabled={disabled}
             className="flex-1 bg-transparent text-sm font-sans text-textMain placeholder-textDim outline-none"

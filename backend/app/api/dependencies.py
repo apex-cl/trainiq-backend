@@ -70,7 +70,23 @@ async def get_current_user(
                         await db.commit()
                         return user
         except HTTPException:
-            pass
+            # Keycloak verification failed — only fall through to local JWT
+            # if the token doesn't look like a Keycloak token (no 'kid' header).
+            # Keycloak tokens always have 'kid'; local HS256 JWTs don't.
+            try:
+                from jose import jwt as jose_jwt
+                header = jose_jwt.get_unverified_header(token)
+                if header.get("kid"):
+                    # This was a Keycloak token that failed verification — don't fall through
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Token verification failed",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass  # Can't parse header — try local JWT below
 
     payload = verify_token(token)
     user_id = payload.get("sub")

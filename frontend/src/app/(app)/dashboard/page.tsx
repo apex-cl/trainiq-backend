@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { useMemo } from "react";
 import { useMetrics } from "@/hooks/useMetrics";
 import { useTraining } from "@/hooks/useTraining";
 import { useQuery } from "@tanstack/react-query";
@@ -7,6 +8,7 @@ import api from "@/lib/api";
 import { Skeleton, MetricSkeleton, WorkoutRowSkeleton } from "@/components/ui/skeleton";
 import { StreakIndicator } from "@/components/StreakIndicator";
 import { SportIcon } from "@/components/ui/SportIcon";
+import { useWatch } from "@/hooks/useWatch";
 
 const EMPTY_NUTRITION = { calories: 0, target_cal: 0, protein_g: 0, target_protein: 0, carbs_g: 0, target_carbs: 0, fat_g: 0, target_fat: 0 };
 
@@ -35,12 +37,13 @@ export default function DashboardPage() {
   const { today: workout, isLoading: trainingLoading, isError: trainingError, refetch: refetchTraining } = useTraining();
   const { data: nutritionData, isLoading: nutritionLoading } = useQuery({
     queryKey: ["nutrition-today"],
-    queryFn: () => api.get("/nutrition/today").then(r => r.data).catch(() => null),
+    queryFn: () => api.get("/nutrition/today").then(r => r.data),
+    staleTime: 1000 * 60 * 5,
   });
 
   const nutTotals = nutritionData?.totals ?? EMPTY_NUTRITION;
   const nutTargets = nutritionData?.targets ?? EMPTY_NUTRITION;
-  const nut = {
+  const nut = useMemo(() => ({
     calories: nutTotals.calories ?? 0,
     protein_g: nutTotals.protein_g ?? 0,
     carbs_g: nutTotals.carbs_g ?? 0,
@@ -49,26 +52,26 @@ export default function DashboardPage() {
     target_protein: nutTargets.target_protein ?? nutTargets.protein_g ?? 0,
     target_carbs: nutTargets.target_carbs ?? nutTargets.carbs_g ?? 0,
     target_fat: nutTargets.target_fat ?? nutTargets.fat_g ?? 0,
-  };
+  }), [nutTotals, nutTargets]);
 
-  const score     = recovery?.score ?? 0;
-  const label     = recovery?.label ?? (metricsLoading ? "LÄDT..." : "KEINE DATEN");
+  const weekArr = useMemo(() => Array.isArray(week) ? week : [], [week]);
+  const w0 = weekArr[0] ?? null;
+  const w1 = weekArr[1] ?? null;
+
+  const hrvTrend    = useMemo(() => calcTrend(w0?.hrv,                w1?.hrv),                [w0, w1]);
+  const sleepTrend  = useMemo(() => calcTrend(w0?.sleep_duration_min, w1?.sleep_duration_min), [w0, w1]);
+  const stressTrend = useMemo(() => calcTrend(w0?.stress_score,       w1?.stress_score, true), [w0, w1]);
+
+  const score         = recovery?.score ?? 0;
+  const label         = recovery?.label ?? (metricsLoading ? "LÄDT..." : "KEINE DATEN");
+  const hasHrv        = recovery?.has_hrv ?? false;
+  const dataAvailable = recovery?.data_available ?? false;
   const scoreColor = metricsLoading ? "text-textDim" : score >= 70 ? "text-blue" : score >= 40 ? "text-textMain" : "text-danger";
   const barColor   = metricsLoading ? "bg-[#EBEBEB]" : score >= 70 ? "bg-blue"   : score >= 40 ? "bg-textDim"    : "bg-danger";
 
-  const hrv   = metrics?.hrv ?? 0;
-  const sleep = metrics?.sleep_duration_min ? (metrics.sleep_duration_min / 60).toFixed(1) : "0.0";
-  const stress = metrics?.stress_score ?? 0;
-
-  // week ist sortiert mit neuestem Eintrag zuerst (oder letzter, je nach API)
-  // Nimm neueste und zweit-neueste Messung
-  const weekArr = Array.isArray(week) ? week : [];
-  const w0 = weekArr[0] ?? null;   // neuester Tag
-  const w1 = weekArr[1] ?? null;   // vorheriger Tag
-
-  const hrvTrend    = calcTrend(w0?.hrv,                w1?.hrv);
-  const sleepTrend  = calcTrend(w0?.sleep_duration_min, w1?.sleep_duration_min);
-  const stressTrend = calcTrend(w0?.stress_score,       w1?.stress_score, true);
+  const hrv    = metrics?.hrv != null ? metrics.hrv : null;
+  const sleep  = metrics?.sleep_duration_min ? (metrics.sleep_duration_min / 60).toFixed(1) : null;
+  const stress = metrics?.stress_score != null ? metrics.stress_score : null;
 
   const dateStr = new Date().toLocaleDateString("de-DE", { weekday: "short", day: "numeric", month: "short" }).toUpperCase();
 
@@ -99,7 +102,6 @@ export default function DashboardPage() {
         <span className="font-pixel text-blue text-xl">TRAINIQ</span>
         <div className="flex items-center gap-3">
           <StreakIndicator />
-          <span className="text-xs font-mono text-textDim tracking-wider">{dateStr}</span>
         </div>
       </div>
 
@@ -121,7 +123,17 @@ export default function DashboardPage() {
           <div className={`bar-fill ${barColor} ${metricsLoading ? "animate-pulse" : ""}`} style={{ width: `${metricsLoading ? 100 : score}%` }} />
         </div>
         <p className="text-xs font-sans text-textDim mt-2 leading-relaxed">
-          {metricsLoading ? "Analysiere Biometrie..." : score === 0 ? "Verbinde eine Uhr oder erfasse Metriken manuell." : score >= 70 ? "HRV liegt über deinem Durchschnitt. Intensives Training möglich." : score >= 40 ? "Moderate Werte. Halte die Intensität kontrolliert." : "Niedrige Werte. Erholung wird empfohlen."}
+          {metricsLoading
+            ? "Analysiere Biometrie..."
+            : score === 0
+              ? (metrics ? "Keine Biometrie-Daten vom heutigen Tag — sync deine Uhr für aktuelle Werte." : "Verbinde eine Uhr oder erfasse Metriken manuell.")
+              : !dataAvailable
+                ? "Score basiert auf Standard-Werten — sync deine Uhr für echte Biometrie."
+                : score >= 70
+                  ? (hasHrv ? "HRV liegt über deinem Durchschnitt. Intensives Training möglich." : "Erholungswerte im grünen Bereich. Intensives Training möglich.")
+                  : score >= 40
+                    ? "Moderate Werte. Halte die Intensität kontrolliert."
+                    : "Niedrige Werte. Erholung wird empfohlen."}
         </p>
       </Link>
 
@@ -131,9 +143,9 @@ export default function DashboardPage() {
       ) : (
         <div className="grid grid-cols-3 border-b border-border">
           {[
-            { label: "HRV",    value: hrv,    unit: "ms",   trend: metricsLoading ? "..." : hrvTrend.text, trendColor: metricsLoading ? "text-textDim" : hrvTrend.color },
-            { label: "Schlaf", value: sleep,  unit: "std",  trend: metricsLoading ? "..." : sleepTrend.text, trendColor: metricsLoading ? "text-textDim" : sleepTrend.color },
-            { label: "Stress", value: stress, unit: "/ 100", trend: metricsLoading ? "..." : stressTrend.text, trendColor: metricsLoading ? "text-textDim" : stressTrend.color },
+            { label: "HRV",    value: hrv != null ? hrv : "—",       unit: hrv != null ? "ms" : "",     trend: metricsLoading ? "..." : hrvTrend.text,   trendColor: metricsLoading ? "text-textDim" : hrvTrend.color },
+            { label: "Schlaf", value: sleep != null ? sleep : "—",   unit: sleep != null ? "std" : "",  trend: metricsLoading ? "..." : sleepTrend.text, trendColor: metricsLoading ? "text-textDim" : sleepTrend.color },
+            { label: "Stress", value: stress != null ? stress : "—", unit: stress != null ? "/ 100" : "", trend: metricsLoading ? "..." : stressTrend.text, trendColor: metricsLoading ? "text-textDim" : stressTrend.color },
           ].map((m, i) => (
             <div key={i} className={`px-4 py-4 ${i < 2 ? "border-r border-border" : ""}`}>
               <p className="text-xs tracking-widest uppercase text-textDim font-sans mb-2">{m.label}</p>
@@ -171,7 +183,7 @@ export default function DashboardPage() {
               )}
             </div>
             <Link href="/training" className="block w-full border border-border text-textDim text-xs tracking-widest uppercase font-sans py-2.5 text-center hover:border-blue hover:text-blue transition-colors">
-              Details anzeigen ──→
+              Details anzeigen →
             </Link>
           </>
         ) : (
@@ -198,22 +210,23 @@ export default function DashboardPage() {
         ) : (
           <>
             {[
-              { label: "Kalorien", val: nut.calories,  target: nut.target_cal,     unit: `${Math.round(nut.calories)}/${nut.target_cal}`,      color: "bg-textMain" },
-              { label: "Protein",  val: nut.protein_g, target: nut.target_protein, unit: `${Math.round(nut.protein_g)}g`,                      color: "bg-blue" },
-              { label: "Carbs",    val: nut.carbs_g,   target: nut.target_carbs,   unit: `${Math.round(nut.carbs_g)}/${nut.target_carbs}g`,    color: "bg-muted" },
-              { label: "Fett",     val: nut.fat_g,     target: nut.target_fat,     unit: `${Math.round(nut.fat_g)}/${nut.target_fat}g`,        color: "bg-muted" },
+              { label: "Kalorien", val: nut.calories,  target: nut.target_cal,     unit: `${Math.round(nut.calories)} / ${nut.target_cal} kcal`, dotColor: "bg-textMain" },
+              { label: "Protein",  val: nut.protein_g, target: nut.target_protein, unit: `${Math.round(nut.protein_g)}g`,                         dotColor: "bg-blue" },
+              { label: "Carbs",    val: nut.carbs_g,   target: nut.target_carbs,   unit: `${Math.round(nut.carbs_g)} / ${nut.target_carbs}g`,     dotColor: "bg-[#888]" },
+              { label: "Fett",     val: nut.fat_g,     target: nut.target_fat,     unit: `${Math.round(nut.fat_g)} / ${nut.target_fat}g`,         dotColor: "bg-[#888]" },
             ].map((n, i) => (
-              <div key={i} className="flex items-center gap-3 mb-3">
-                <span className="text-xs font-sans text-textDim w-16 tracking-wider uppercase">{n.label}</span>
-                <div className="bar-track flex-1"><div className={`bar-fill ${n.color}`} style={{ width: `${Math.min(100, (n.val / n.target) * 100)}%` }} /></div>
-                <span className="font-pixel text-textDim text-sm whitespace-nowrap" style={{ fontSize: 13 }}>{n.unit}</span>
+              <div key={i} className="flex items-center gap-2 mb-2.5">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${n.dotColor}`} />
+                <span className="text-xs font-sans text-textDim w-14 tracking-wider uppercase shrink-0">{n.label}</span>
+                <div className="bar-track flex-1"><div className={`bar-fill ${n.dotColor}`} style={{ width: `${n.target > 0 ? Math.min(100, (n.val / n.target) * 100) : 0}%` }} /></div>
+                <span className="font-sans text-textDim whitespace-nowrap" style={{ fontSize: 11 }}>{n.unit}</span>
               </div>
             ))}
           </>
         )}
         {/* Details Link */}
         <Link href="/ernaehrung" className="block w-full border border-border text-textDim text-xs tracking-widest uppercase font-sans py-2.5 text-center hover:border-blue hover:text-blue transition-colors mt-3">
-          Details anzeigen ──→
+          Details anzeigen →
         </Link>
       </div>
 

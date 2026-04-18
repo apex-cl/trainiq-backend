@@ -4,6 +4,17 @@ import { cachePlans, getCachedPlans, queueAction } from "@/lib/offline";
 
 const SPORTS: Record<string, string> = {
   running: "LAUFEN", cycling: "RADFAHREN", swimming: "SCHWIMMEN", rest: "PAUSE",
+  // Garmin typeKey values
+  road_biking: "RADFAHREN", mountain_biking: "MTB", indoor_cycling: "RADFAHREN",
+  open_water_swimming: "SCHWIMMEN", pool_swimming: "SCHWIMMEN",
+  trail_running: "TRAIL", treadmill_running: "LAUFBAND",
+  strength_training: "KRAFT", weight_training: "KRAFT",
+  yoga: "YOGA", hiit: "HIIT", cardio_training: "CARDIO",
+  walking: "GEHEN", hiking: "WANDERN",
+  rowing: "RUDERN", kayaking: "KAJAK",
+  soccer: "FUSSBALL", tennis: "TENNIS", basketball: "BASKETBALL",
+  skiing: "SKI", snowboarding: "SNOWBOARD",
+  other: "TRAINING", workout: "TRAINING", imported: "IMPORTIERT",
 };
 
 function getDate(offsetDays: number) {
@@ -51,28 +62,30 @@ export function useTraining() {
 
   const complete = useMutation({
     mutationFn: async (id: string) => {
-      try {
-        await api.post(`/training/complete/${id}`);
-      } catch {
-        if (!navigator.onLine) {
-          await queueAction({ type: "complete", endpoint: `/training/complete/${id}`, method: "POST" });
-        }
+      if (!navigator.onLine) {
+        await queueAction({ type: "complete", endpoint: `/training/complete/${id}`, method: "POST" });
+        return;
       }
+      await api.post(`/training/complete/${id}`);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["training-week"] }),
+    onError: (err) => {
+      console.error("[TrainIQ] Training complete failed:", err);
+    },
   });
 
   const skip = useMutation({
     mutationFn: async ({ id, reason }: { id: string; reason: string }) => {
-      try {
-        await api.post(`/training/skip/${id}`, { reason });
-      } catch {
-        if (!navigator.onLine) {
-          await queueAction({ type: "skip", endpoint: `/training/skip/${id}`, method: "POST", body: { reason } });
-        }
+      if (!navigator.onLine) {
+        await queueAction({ type: "skip", endpoint: `/training/skip/${id}`, method: "POST", body: { reason } });
+        return;
       }
+      await api.post(`/training/skip/${id}`, { reason });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["training-week"] }),
+    onError: (err) => {
+      console.error("[TrainIQ] Training skip failed:", err);
+    },
   });
 
   const weekData = week.data ?? [];
@@ -83,6 +96,8 @@ export function useTraining() {
     today,
     complete: complete.mutate,
     skip: skip.mutate,
+    completeError: complete.isError,
+    skipError: skip.isError,
     isLoading: week.isLoading,
     isError: week.isError,
     refetch: () => week.refetch()

@@ -63,9 +63,7 @@ async def subscribe_push(
         logger.warning(
             f"Push subscription save failed | user={current_user.id} | error={e}"
         )
-        if db:
-            await db.rollback()
-        return {"ok": False, "error": str(e)}, 500
+        raise HTTPException(status_code=500, detail="Push-Subscription konnte nicht gespeichert werden")
 
     return {"ok": True}
 
@@ -81,7 +79,7 @@ async def unsubscribe_push(
         from app.services.push_notification import PushNotificationService
 
         service = PushNotificationService()
-        await service.unsubscribe(body.endpoint, db)
+        await service.unsubscribe(body.endpoint, str(current_user.id), db)
         await db.commit()
         logger.info(f"Push subscription removed | user={current_user.id}")
     except Exception as e:

@@ -21,8 +21,9 @@ class KeycloakJWTService:
             ):
                 return self._jwks_cache
 
-        jwks_url = f"{settings.keycloak_url}/realms/{settings.keycloak_realm}/protocol/openid-connect/certs"
-        async with httpx.AsyncClient() as client:
+        _internal_url = settings.keycloak_internal_url or settings.keycloak_url
+        jwks_url = f"{_internal_url}/realms/{settings.keycloak_realm}/protocol/openid-connect/certs"
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(jwks_url)
             if response.status_code == 200:
                 self._jwks_cache = response.json()
@@ -82,10 +83,10 @@ class KeycloakJWTService:
                 issuer=f"{settings.keycloak_url}/realms/{settings.keycloak_realm}",
             )
             return payload
-        except JWTError as e:
+        except JWTError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Token validation failed: {str(e)}",
+                detail="Token validation failed",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 

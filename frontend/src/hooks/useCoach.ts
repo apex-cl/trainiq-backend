@@ -1,6 +1,7 @@
 "use client";
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import api from "@/lib/api";
+import { useAuthStore } from "@/store/auth";
 
 export interface Message {
   id: string;
@@ -15,6 +16,12 @@ export interface GuestLimits {
   isGuest: boolean;
 }
 
+function newId(): string {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function useCoach() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
@@ -26,7 +33,11 @@ export function useCoach() {
     isGuest: false,
   });
 
-  const isGuest = typeof window !== "undefined" && !localStorage.getItem("token");
+  const token = useAuthStore((s) => s.token);
+  const isGuest = !token;
+
+  // Ref to abort in-flight SSE streams when component unmounts or new send starts
+  const abortRef = useRef<AbortController | null>(null);
 
   // Gast-Limits laden
   useEffect(() => {
@@ -34,17 +45,19 @@ export function useCoach() {
     const guestToken = localStorage.getItem("guest_token");
     if (!guestToken) return;
 
-    const loadLimits = async () => {
-      try {
-        const res = await api.get(`/guest/session/${guestToken}`);
+    const controller = new AbortController();
+    api.get(`/guest/session/${guestToken}`, { signal: controller.signal })
+      .then((res) => {
         setGuestLimits({
           messagesRemaining: res.data.messages_remaining,
           photosRemaining: res.data.photos_remaining,
           isGuest: true,
         });
-      } catch {}
-    };
-    loadLimits();
+      })
+      .catch(() => {
+        // Guest limits unavailable — UI continues without limit display
+      });
+    return () => controller.abort();
   }, [isGuest]);
 
   // Chat-Historie beim Start laden (nur für eingeloggte User)
@@ -53,9 +66,9 @@ export function useCoach() {
       setHistoryLoading(false);
       return;
     }
-    const loadHistory = async () => {
-      try {
-        const { data } = await api.get("/coach/history");
+    const controller = new AbortController();
+    api.get("/coach/history", { signal: controller.signal })
+      .then(({ data }) => {
         if (Array.isArray(data) && data.length > 0) {
           setMessages(
             data.map((m: { role: string; content: string; created_at: string }, i: number) => ({
@@ -66,19 +79,32 @@ export function useCoach() {
             }))
           );
         }
-      } catch {
-        // History nicht ladbar — leerer Start ist OK
-      } finally {
+      })
+      .catch(() => {
+        // History unavailable — empty start is acceptable
+      })
+      .finally(() => {
         setHistoryLoading(false);
-      }
-    };
-    loadHistory();
+      });
+    return () => controller.abort();
   }, [isGuest]);
 
+  // Abort any open stream on unmount
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
   const sendMessage = useCallback(async (text: string) => {
+    // Abort any previous in-flight request
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setIsError(false);
     const userMsg: Message = {
-      id: Date.now().toString(),
+      id: newId(),
       role: "user",
       content: text,
       created_at: new Date().toISOString(),
@@ -86,22 +112,22 @@ export function useCoach() {
     setMessages((prev) => [...prev, userMsg]);
     setLoading(true);
 
-    const assistantId = (Date.now() + 1).toString();
+    const assistantId = newId();
     setMessages((prev) => [
       ...prev,
       { id: assistantId, role: "assistant", content: "", created_at: new Date().toISOString() },
     ]);
 
     try {
-      const token = localStorage.getItem("token");
+      const currentToken = useAuthStore.getState().token;
       const guestToken = localStorage.getItem("guest_token");
       const baseURL = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
-      
+
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
+      if (currentToken) {
+        headers["Authorization"] = `Bearer ${currentToken}`;
       } else if (guestToken) {
         headers["X-Guest-Token"] = guestToken;
       }
@@ -110,18 +136,23 @@ export function useCoach() {
         method: "POST",
         headers,
         body: JSON.stringify({ message: text }),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        if (res.status === 403 && err.detail?.includes("Gast-Limit")) {
+        const detail = typeof err.detail === "string"
+          ? err.detail
+          : Array.isArray(err.detail)
+            ? err.detail.map((d: { msg?: string }) => d.msg ?? String(d)).join(", ")
+            : String(err.detail || "");
+        if (res.status === 403 && detail.includes("Gast-Limit")) {
           setGuestLimits((prev) => ({ ...prev, messagesRemaining: 0 }));
           throw new Error("LIMIT_REACHED");
         }
-        throw new Error(err.detail || "Request failed");
+        throw new Error(detail || "Request failed");
       }
 
-      // Gast-Limits aus Response-Header aktualisieren
       const remaining = res.headers.get("X-Guest-Messages-Remaining");
       if (remaining !== null) {
         setGuestLimits((prev) => ({
@@ -137,44 +168,44 @@ export function useCoach() {
       if (reader) {
         let buffer = "";
         let streamDone = false;
-        while (!streamDone) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+        try {
+          while (!streamDone) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
 
-          // SSE Events aus Buffer extrahieren (getrennt durch \n\n)
-          const events = buffer.split("\n\n");
-          buffer = events.pop() ?? ""; // Letztes (unvollständiges) Event zurückbehalten
+            const events = buffer.split("\n\n");
+            buffer = events.pop() ?? "";
 
-          for (const event of events) {
-            // Mehrzeilige SSE-Chunks zusammenführen: "data: line1\ndata: line2" → "line1\nline2"
-            const dataLines = event
-              .split("\n")
-              .filter((l) => l.startsWith("data: "))
-              .map((l) => l.slice(6));
+            for (const event of events) {
+              const dataLines = event
+                .split("\n")
+                .filter((l) => l.startsWith("data: "))
+                .map((l) => l.slice(6));
 
-            const data = dataLines.join("\n");
+              const data = dataLines.join("\n");
+              if (data === "[DONE]") { streamDone = true; break; }
+              if (!data) continue;
 
-            if (!data || data === "[DONE]") { streamDone = true; break; }
-
-            full += data;
-            setMessages((prev) =>
-              prev.map((m) => (m.id === assistantId ? { ...m, content: full } : m))
-            );
+              full += data;
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantId ? { ...m, content: full } : m))
+              );
+            }
           }
+        } finally {
+          reader.cancel();
         }
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setIsError(true);
-      const errorMsg = err.message === "LIMIT_REACHED"
+      const msg = err instanceof Error ? err.message : "";
+      const errorMsg = msg === "LIMIT_REACHED"
         ? "Gast-Limit erreicht. Bitte registrieren für mehr Nachrichten."
         : "Verbindungsfehler. Bitte versuche es erneut.";
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? { ...m, content: errorMsg }
-            : m
-        )
+        prev.map((m) => (m.id === assistantId ? { ...m, content: errorMsg } : m))
       );
     } finally {
       setLoading(false);
@@ -182,11 +213,16 @@ export function useCoach() {
   }, []);
 
   const sendImage = useCallback(async (file: File) => {
+    // Abort any previous in-flight request
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setIsError(false);
 
-    // Benutzer-Nachricht mit Foto-Indikator
+    const userMsgId = newId();
     const userMsg: Message = {
-      id: Date.now().toString(),
+      id: userMsgId,
       role: "user",
       content: "Foto hochgeladen — analysiere Mahlzeit...",
       created_at: new Date().toISOString(),
@@ -194,38 +230,33 @@ export function useCoach() {
     setMessages((prev) => [...prev, userMsg]);
     setLoading(true);
 
-    const assistantId = (Date.now() + 1).toString();
+    const assistantId = newId();
     setMessages((prev) => [
       ...prev,
-      {
-        id: assistantId,
-        role: "assistant",
-        content: "",
-        created_at: new Date().toISOString(),
-      },
+      { id: assistantId, role: "assistant", content: "", created_at: new Date().toISOString() },
     ]);
 
     try {
-      // Schritt 1: Bild zu /nutrition/upload hochladen
+      const currentToken = useAuthStore.getState().token;
+      const guestToken = localStorage.getItem("guest_token");
+      const baseURL = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
+
       const form = new FormData();
       form.append("file", file);
       form.append("meal_type", "Mahlzeit");
 
-      const token = localStorage.getItem("token");
-      const guestToken = localStorage.getItem("guest_token");
-      const baseURL = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
-
-      const headers: Record<string, string> = {};
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
+      const uploadHeaders: Record<string, string> = {};
+      if (currentToken) {
+        uploadHeaders["Authorization"] = `Bearer ${currentToken}`;
       } else if (guestToken) {
-        headers["X-Guest-Token"] = guestToken;
+        uploadHeaders["X-Guest-Token"] = guestToken;
       }
 
       const uploadResp = await fetch(`${baseURL}/nutrition/upload`, {
         method: "POST",
-        headers,
+        headers: uploadHeaders,
         body: form,
+        signal: controller.signal,
       });
 
       if (!uploadResp.ok) {
@@ -239,15 +270,10 @@ export function useCoach() {
 
       const analysis = await uploadResp.json();
 
-      // Gast-Foto-Limit aktualisieren
       if (analysis.photos_remaining !== undefined) {
-        setGuestLimits((prev) => ({
-          ...prev,
-          photosRemaining: analysis.photos_remaining,
-        }));
+        setGuestLimits((prev) => ({ ...prev, photosRemaining: analysis.photos_remaining }));
       }
 
-      // Kontext für den Coach aus der Analyse aufbauen
       const extraContext = [
         `Mahlzeit analysiert: ${analysis.meal_name || "Unbekannt"}`,
         `Kalorien: ${Math.round(analysis.calories || 0)} kcal`,
@@ -257,14 +283,9 @@ export function useCoach() {
         `Erkennungsgenauigkeit: ${analysis.confidence || "unbekannt"}`,
       ].join(", ");
 
-      // Schritt 2: Coach mit Analyse-Kontext anfragen
-      const coachMessage = "Ich habe gerade eine Mahlzeit fotografiert. Was hältst du davon im Kontext meines Trainings?";
-
-      const chatHeaders: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (token) {
-        chatHeaders["Authorization"] = `Bearer ${token}`;
+      const chatHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (currentToken) {
+        chatHeaders["Authorization"] = `Bearer ${currentToken}`;
       } else if (guestToken) {
         chatHeaders["X-Guest-Token"] = guestToken;
       }
@@ -273,19 +294,16 @@ export function useCoach() {
         method: "POST",
         headers: chatHeaders,
         body: JSON.stringify({
-          message: coachMessage,
+          message: "Ich habe gerade eine Mahlzeit fotografiert. Was hältst du davon im Kontext meines Trainings?",
           extra_context: extraContext,
         }),
+        signal: controller.signal,
       });
 
-      // User-Nachricht auf echten Text aktualisieren
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === userMsg.id
-            ? {
-                ...m,
-                content: `📷 ${analysis.meal_name || "Mahlzeit"} — ${Math.round(analysis.calories || 0)} kcal`,
-              }
+          m.id === userMsgId
+            ? { ...m, content: `📷 ${analysis.meal_name || "Mahlzeit"} — ${Math.round(analysis.calories || 0)} kcal` }
             : m
         )
       );
@@ -297,50 +315,52 @@ export function useCoach() {
       if (reader) {
         let buffer = "";
         let streamDone = false;
-        while (!streamDone) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+        try {
+          while (!streamDone) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
 
-          // SSE Events aus Buffer extrahieren (getrennt durch \n\n)
-          const events = buffer.split("\n\n");
-          buffer = events.pop() ?? "";
+            const events = buffer.split("\n\n");
+            buffer = events.pop() ?? "";
 
-          for (const event of events) {
-            const dataLines = event
-              .split("\n")
-              .filter((l) => l.startsWith("data: "))
-              .map((l) => l.slice(6));
+            for (const event of events) {
+              const dataLines = event
+                .split("\n")
+                .filter((l) => l.startsWith("data: "))
+                .map((l) => l.slice(6));
 
-            const data = dataLines.join("\n");
+              const data = dataLines.join("\n");
+              if (data === "[DONE]") { streamDone = true; break; }
+              if (!data) continue;
 
-            if (!data || data === "[DONE]") { streamDone = true; break; }
-
-            full += data;
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, content: full } : m
-              )
-            );
+              full += data;
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantId ? { ...m, content: full } : m))
+              );
+            }
           }
+        } finally {
+          reader.cancel();
         }
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setIsError(true);
-      const errorMsg = err.message === "PHOTO_LIMIT_REACHED"
+      const msg = err instanceof Error ? err.message : "";
+      const errorMsg = msg === "PHOTO_LIMIT_REACHED"
         ? "Gast-Limit erreicht. Bitte registrieren für mehr Foto-Uploads."
         : "Bild konnte nicht analysiert werden. Bitte versuche es erneut.";
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? { ...m, content: errorMsg }
-            : m
-        )
+        prev.map((m) => (m.id === assistantId ? { ...m, content: errorMsg } : m))
       );
     } finally {
       setLoading(false);
     }
   }, []);
 
-  return { messages, loading, historyLoading, isError, sendMessage, sendImage, guestLimits };
+  const clearMessages = useCallback(() => setMessages([]), []);
+
+  return { messages, loading, historyLoading, isError, sendMessage, sendImage, guestLimits, clearMessages };
 }
+

@@ -1,11 +1,29 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { syncQueuedActions } from "@/lib/offline";
 
 export function useOffline() {
   const [isOffline, setIsOffline] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncCount, setSyncCount] = useState(0);
+
+  const syncingRef = useRef(false);
+
+  const handleSync = useCallback(async () => {
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    setSyncing(true);
+    try {
+      const count = await syncQueuedActions();
+      setSyncCount(count);
+      if (count > 0) {
+        setTimeout(() => setSyncCount(0), 3000);
+      }
+    } finally {
+      syncingRef.current = false;
+      setSyncing(false);
+    }
+  }, []);
 
   useEffect(() => {
     setIsOffline(!navigator.onLine);
@@ -26,21 +44,7 @@ export function useOffline() {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
-  }, []);
-
-  const handleSync = useCallback(async () => {
-    if (syncing) return;
-    setSyncing(true);
-    try {
-      const count = await syncQueuedActions();
-      setSyncCount(count);
-      if (count > 0) {
-        setTimeout(() => setSyncCount(0), 3000);
-      }
-    } finally {
-      setSyncing(false);
-    }
-  }, [syncing]);
+  }, [handleSync]);
 
   return { isOffline, syncing, syncCount, manualSync: handleSync };
 }

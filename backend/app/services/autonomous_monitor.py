@@ -13,6 +13,7 @@ from app.core.database import async_session
 from app.models.user import User
 from app.models.conversation import Conversation
 from app.services.coach_prompts import get_detection_prompt
+from app.core.redis import get_redis
 
 
 # Mindest-Abstand zwischen zwei autonomen Aktionen pro User
@@ -20,18 +21,17 @@ COOLDOWN_HOURS = 6
 COOLDOWN_KEY_PREFIX = "autonomous_monitor_last_action:"
 
 
-async def _get_redis():
-    """Erstellt Redis-Verbindung."""
-    return aioredis.from_url(settings.redis_url, decode_responses=True)
+def _get_redis() -> aioredis.Redis:
+    """Shared Redis-Verbindung."""
+    return get_redis()
 
 
 async def _is_in_cooldown(user_id: str) -> bool:
     """Prüft ob User in Cooldown-Phase ist (letzte Aktion < COOLDOWN_HOURS ago)."""
     try:
-        r = await _get_redis()
+        r = _get_redis()
         key = f"{COOLDOWN_KEY_PREFIX}{user_id}"
         exists = await r.exists(key)
-        await r.aclose()
         return bool(exists)
     except Exception:
         return False  # Bei Redis-Fehler: kein Cooldown (fail open)
@@ -40,10 +40,9 @@ async def _is_in_cooldown(user_id: str) -> bool:
 async def _set_cooldown(user_id: str):
     """Setzt Cooldown für User (COOLDOWN_HOURS Stunden)."""
     try:
-        r = await _get_redis()
+        r = _get_redis()
         key = f"{COOLDOWN_KEY_PREFIX}{user_id}"
         await r.setex(key, COOLDOWN_HOURS * 3600, "1")
-        await r.aclose()
     except Exception:
         pass
 
@@ -102,7 +101,12 @@ async def run_autonomous_monitor():
 
     async with async_session() as db:
         try:
-            result = await db.execute(select(User))
+            result = await db.execute(
+                select(User).where(
+                    User.email.isnot(None),
+                    User.email.contains("@"),
+                )
+            )
             users = result.scalars().all()
 
             processed = 0

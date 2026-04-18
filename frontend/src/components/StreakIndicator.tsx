@@ -1,8 +1,9 @@
 "use client";
+import { memo } from "react";
 import { Flame } from "lucide-react";
 import { useStreak } from "@/hooks/useGamification";
 
-export function StreakIndicator() {
+export const StreakIndicator = memo(function StreakIndicator() {
   const { streak, isLoading } = useStreak();
 
   if (isLoading) return <div className="w-12 h-5 bg-[#EBEBEB] animate-pulse" />;
@@ -16,4 +17,4 @@ export function StreakIndicator() {
       </span>
     </div>
   );
-}
+});

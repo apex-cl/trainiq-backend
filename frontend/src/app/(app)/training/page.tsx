@@ -4,6 +4,7 @@ import { useTraining, getDate, SPORTS } from "@/hooks/useTraining";
 import { Skeleton, WorkoutRowSkeleton } from "@/components/ui/skeleton";
 import { useTrainingStats } from "@/hooks/useTrainingStats";
 import { SportIcon } from "@/components/ui/SportIcon";
+import { useWatch } from "@/hooks/useWatch";
 const DAY_NAMES = ["SO", "MO", "DI", "MI", "DO", "FR", "SA"];
 const STATUS_STYLE: Record<string, string> = { completed: "text-blue", skipped: "text-danger", planned: "text-textDim" };
 const STATUS_ICON: Record<string, string>  = { completed: "✓", skipped: "✕", planned: "›" };
@@ -20,11 +21,14 @@ export default function TrainingPage() {
   const selectedPlan = week.find((p: { date: string }) => p.date === selected);
 
   const handleComplete = (id: string) => {
+    if (id.startsWith("empty-")) return;
     complete(id);
   };
 
   const handleSkipConfirm = (id: string) => {
+    if (id.startsWith("empty-")) { setShowSkip(false); return; }
     skip({ id, reason: skipReason });
+    setSkipReason("");
     setShowSkip(false);
   };
 
@@ -327,6 +331,7 @@ export default function TrainingPage() {
           <p className="text-xs font-sans text-textDim">Noch keine Statistiken verfügbar.</p>
         )}
       </div>
+
     </div>
 
   );

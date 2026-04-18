@@ -7,7 +7,16 @@ from app.core.config import settings
 _db_url = settings.database_url.replace("postgresql://", "postgresql+asyncpg://")
 _engine_kwargs: dict = {"echo": False, "pool_pre_ping": True}
 if "postgresql" in _db_url:
-    _engine_kwargs.update(pool_size=10, max_overflow=20, pool_recycle=3600)
+    _engine_kwargs.update(
+        pool_size=20,           # was 10 — handle more concurrent requests
+        max_overflow=30,        # was 20 — burst capacity
+        pool_recycle=1800,      # recycle connections every 30 min (was 1 hour)
+        pool_timeout=30,        # wait max 30s for a connection
+        connect_args={
+            "statement_cache_size": 500,   # asyncpg prepared statement cache
+            "command_timeout": 60,
+        },
+    )
 
 engine = create_async_engine(_db_url, **_engine_kwargs)
 
