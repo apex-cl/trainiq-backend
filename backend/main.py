@@ -279,7 +279,8 @@ async def health():
     try:
         from app.core.redis import get_redis
 
-        result = await get_redis().ping()
+        r = await get_redis()
+        result = await r.ping()
         if result is True:
             redis_ok = True
     except Exception:

@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # Security: Non-root user
 RUN groupadd --gid 1001 appuser && \
-    useradd --uid 1001 --gid appuser --no-create-home --shell /bin/false appuser
+    useradd --uid 1001 --gid appuser --create-home --shell /bin/false appuser
 
 WORKDIR /app
 
